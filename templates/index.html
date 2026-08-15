@@ -111,10 +111,16 @@
           <span id="page-indicator">Page 1 / 1</span>
           <button id="next-page">&gt;</button>
         </div>
+        <div class="zoom-controls">
+          <button id="zoom-out" aria-label="Zoom out">&minus;</button>
+          <span id="zoom-indicator">100%</span>
+          <button id="zoom-in" aria-label="Zoom in">+</button>
+          <button id="zoom-fit" class="secondary">Fit</button>
+        </div>
       </div>
 
       <div class="chop-main">
-        <div class="pdf-canvas-wrap">
+        <div class="pdf-canvas-wrap" id="pdf-canvas-wrap">
           <canvas id="pdf-canvas"></canvas>
           <canvas id="overlay-canvas"></canvas>
         </div>

@@ -271,6 +271,29 @@ form#add-paper-form {
   padding: 6px 12px;
 }
 
+.zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.zoom-controls button {
+  padding: 6px 12px;
+  min-width: 34px;
+}
+
+.zoom-controls #zoom-fit {
+  min-width: auto;
+  font-size: 12px;
+}
+
+#zoom-indicator {
+  min-width: 44px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--muted);
+}
+
 .chop-main {
   display: flex;
   gap: 16px;

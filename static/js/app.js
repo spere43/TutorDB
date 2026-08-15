@@ -146,9 +146,19 @@ document.getElementById("chop-back").addEventListener("click", refreshChopPicker
 let pdfDoc = null;
 let currentPage = 1;
 let currentPaperId = null;
-let scale = 1.4;
 let selectedDifficulty = null;
 let pendingCropBlob = null;
+
+// baseScale = the PDF.js scale that makes the page exactly fill the
+// available width on THIS device. zoomLevel is a multiplier the user
+// can adjust on top of that with the +/-/Fit controls. This is what
+// makes the page look the same relative size on phone, iPad and desktop,
+// instead of one fixed "scale" that's too big on small screens.
+let baseScale = 1;
+let zoomLevel = 1;
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 3;
+const ZOOM_STEP = 0.15;
 
 async function openChop(paperId, filePath, title) {
   currentPaperId = paperId;
@@ -159,39 +169,98 @@ async function openChop(paperId, filePath, title) {
   const loadingTask = pdfjsLib.getDocument(`/files/${filePath}`);
   pdfDoc = await loadingTask.promise;
   currentPage = 1;
+  zoomLevel = 1;
+  await computeBaseScale();
   await renderPage(currentPage);
   resetQuestionForm();
 }
 
+// Figures out the scale needed so the page width matches the container
+// width available on this device/orientation right now.
+async function computeBaseScale() {
+  const page = await pdfDoc.getPage(currentPage);
+  const unscaledViewport = page.getViewport({ scale: 1 });
+  const wrap = document.getElementById("pdf-canvas-wrap");
+  const available = Math.max(200, wrap.clientWidth - 4);
+  baseScale = available / unscaledViewport.width;
+}
+
 async function renderPage(num) {
   const page = await pdfDoc.getPage(num);
+  const scale = baseScale * zoomLevel;
   const viewport = page.getViewport({ scale });
+
+  // Render at the device's actual pixel density so it's crisp on
+  // Retina-style screens (iPad/iPhone), while keeping the on-screen
+  // (CSS) size tied to `scale` so touch/mouse drawing stays accurate.
+  const dpr = window.devicePixelRatio || 1;
 
   const pdfCanvas = document.getElementById("pdf-canvas");
   const overlayCanvas = document.getElementById("overlay-canvas");
-  pdfCanvas.width = viewport.width;
-  pdfCanvas.height = viewport.height;
-  overlayCanvas.width = viewport.width;
-  overlayCanvas.height = viewport.height;
+
+  pdfCanvas.width = Math.round(viewport.width * dpr);
+  pdfCanvas.height = Math.round(viewport.height * dpr);
+  pdfCanvas.style.width = `${viewport.width}px`;
+  pdfCanvas.style.height = `${viewport.height}px`;
+
+  overlayCanvas.width = pdfCanvas.width;
+  overlayCanvas.height = pdfCanvas.height;
+  overlayCanvas.style.width = `${viewport.width}px`;
+  overlayCanvas.style.height = `${viewport.height}px`;
 
   const ctx = pdfCanvas.getContext("2d");
-  await page.render({ canvasContext: ctx, viewport }).promise;
+  const renderContext = { canvasContext: ctx, viewport };
+  if (dpr !== 1) renderContext.transform = [dpr, 0, 0, dpr, 0, 0];
+  await page.render(renderContext).promise;
 
   document.getElementById("page-indicator").textContent = `Page ${num} / ${pdfDoc.numPages}`;
+  document.getElementById("zoom-indicator").textContent = `${Math.round(zoomLevel * 100)}%`;
   clearOverlay();
 }
 
 document.getElementById("prev-page").addEventListener("click", async () => {
   if (currentPage > 1) {
     currentPage--;
+    await computeBaseScale();
     await renderPage(currentPage);
   }
 });
 document.getElementById("next-page").addEventListener("click", async () => {
   if (pdfDoc && currentPage < pdfDoc.numPages) {
     currentPage++;
+    await computeBaseScale();
     await renderPage(currentPage);
   }
+});
+
+document.getElementById("zoom-in").addEventListener("click", async () => {
+  if (!pdfDoc) return;
+  zoomLevel = Math.min(MAX_ZOOM, +(zoomLevel + ZOOM_STEP).toFixed(2));
+  await renderPage(currentPage);
+});
+document.getElementById("zoom-out").addEventListener("click", async () => {
+  if (!pdfDoc) return;
+  zoomLevel = Math.max(MIN_ZOOM, +(zoomLevel - ZOOM_STEP).toFixed(2));
+  await renderPage(currentPage);
+});
+document.getElementById("zoom-fit").addEventListener("click", async () => {
+  if (!pdfDoc) return;
+  zoomLevel = 1;
+  await computeBaseScale();
+  await renderPage(currentPage);
+});
+
+// Re-fit when the device rotates or the window/container is resized,
+// so switching from portrait to landscape on iPad doesn't leave the
+// page mis-sized. Only re-fits if the user hasn't manually zoomed.
+let resizeTimer = null;
+window.addEventListener("resize", () => {
+  if (!pdfDoc || zoomLevel !== 1) return;
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(async () => {
+    await computeBaseScale();
+    await renderPage(currentPage);
+  }, 200);
 });
 
 // ---- Box drawing on overlay canvas (mouse + touch) ----
