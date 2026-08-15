@@ -149,6 +149,8 @@ let currentPaperId = null;
 let scale = 1.4;
 let selectedDifficulty = null;
 let pendingCropBlob = null;
+let currentScale = 1.0;
+let userScaleOverride = null; // Track manual zoom adjustments
 
 async function openChop(paperId, filePath, title) {
   currentPaperId = paperId;
@@ -164,22 +166,67 @@ async function openChop(paperId, filePath, title) {
 }
 
 async function renderPage(num) {
-  const page = await pdfDoc.getPage(num);
-  const viewport = page.getViewport({ scale });
+  if (!pdfDoc) return;
 
+  const page = await pdfDoc.getPage(num);
   const pdfCanvas = document.getElementById("pdf-canvas");
   const overlayCanvas = document.getElementById("overlay-canvas");
+  const container = document.querySelector(".pdf-canvas-wrap");
+
+  // Get base PDF dimensions at scale = 1.0
+  const unscaledViewport = page.getViewport({ scale: 1.0 });
+
+  // Calculate fit-to-width scale based on screen/container size
+  const containerWidth = container.clientWidth - 20; // 20px padding margin
+  const autoScale = containerWidth / unscaledViewport.width;
+
+  // Use user manual scale if set; otherwise, use responsive autoScale
+  currentScale = userScaleOverride || autoScale;
+
+  const viewport = page.getViewport({ scale: currentScale });
+
+  // Size both canvases to match viewport dimensions exactly
   pdfCanvas.width = viewport.width;
   pdfCanvas.height = viewport.height;
   overlayCanvas.width = viewport.width;
   overlayCanvas.height = viewport.height;
 
+  // Render PDF content onto PDF Canvas
   const ctx = pdfCanvas.getContext("2d");
   await page.render({ canvasContext: ctx, viewport }).promise;
 
+  // Update UI indicators
   document.getElementById("page-indicator").textContent = `Page ${num} / ${pdfDoc.numPages}`;
+  document.getElementById("zoom-indicator").textContent = `${Math.round(currentScale * 100)}%`;
+
   clearOverlay();
 }
+
+// --- Zoom Event Listeners ---
+
+document.getElementById("zoom-in").addEventListener("click", async () => {
+  userScaleOverride = (currentScale || 1.0) + 0.15;
+  await renderPage(currentPage);
+});
+
+document.getElementById("zoom-out").addEventListener("click", async () => {
+  if (currentScale > 0.3) {
+    userScaleOverride = currentScale - 0.15;
+    await renderPage(currentPage);
+  }
+});
+
+document.getElementById("zoom-fit").addEventListener("click", async () => {
+  userScaleOverride = null; // Reset back to dynamic auto-fit
+  await renderPage(currentPage);
+});
+
+// Re-render automatically on window/screen orientation change
+window.addEventListener("resize", () => {
+  if (pdfDoc && !userScaleOverride) {
+    renderPage(currentPage);
+  }
+});
 
 document.getElementById("prev-page").addEventListener("click", async () => {
   if (currentPage > 1) {

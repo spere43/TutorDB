@@ -271,32 +271,42 @@ form#add-paper-form {
   padding: 6px 12px;
 }
 
-.chop-main {
-  display: flex;
-  gap: 16px;
-  align-items: flex-start;
-  flex-wrap: wrap;
+.chop-main { 
+  display: flex; 
+  flex-direction: row; 
+  gap: 16px; 
+  align-items: flex-start; 
 }
 
-.pdf-canvas-wrap {
-  position: relative;
-  flex: 1 1 500px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: auto;
-  max-height: 80vh;
-  background: #2b2e35;
+/* Stack vertically on tablet/mobile screens */
+@media (max-width: 768px) {
+  .chop-main {
+    flex-direction: column;
+  }
 }
 
-#pdf-canvas, #overlay-canvas {
+.pdf-canvas-wrap { 
+  position: relative; 
+  flex: 1 1 500px; 
+  max-width: 100%;
+  border: 1px solid var(--border); 
+  border-radius: 8px; 
+  overflow: auto; /* Enable touch/scroll when zoomed in */
+  max-height: 80vh; 
+  background: #2b2e35; 
+  touch-action: pan-x pan-y; /* Allows smooth scrolling outside bounding box drag */
+}
+
+#pdf-canvas {
   display: block;
+  margin: 0 auto;
 }
 
 #overlay-canvas {
   position: absolute;
   top: 0;
   left: 0;
-  touch-action: none;
+  touch-action: none; /* Capture custom dragging on overlay */
   cursor: crosshair;
 }
 
