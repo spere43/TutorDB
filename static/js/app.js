@@ -1,4 +1,5 @@
-pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.js";
+import * as pdfjsLib from "/static/vendor/pdfjs/pdf.min.mjs";
+pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/vendor/pdfjs/pdf.worker.min.mjs";
 
 // ---------------------------------------------------------------
 // Tab switching
@@ -419,5 +420,9 @@ async function deleteQuestion(id) {
 // ---------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------
+window.deletePaper = deletePaper;
+window.openChop = openChop;
+window.deleteQuestion = deleteQuestion;
+
 loadDropdownData();
 refreshBrowse();
