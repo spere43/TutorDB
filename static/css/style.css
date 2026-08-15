@@ -369,4 +369,19 @@ form#add-paper-form {
   .chop-main { flex-direction: column; }
   .chop-form { flex: 1 1 auto; width: 100%; }
   .page-nav { margin-left: 0; }
+
+  /* In column mode, flex-basis governs HEIGHT (not width), and the parent's
+     align-items:flex-start means children no longer stretch to fill the
+     container's width either -- both are row-layout assumptions that don't
+     carry over. So on mobile the wrap gets its own explicit rules instead
+     of reusing the desktop flex value: width is forced to 100% (since it
+     won't stretch on its own), and height is left as "auto" (sized to the
+     rendered page, capped by max-height/overflow above) instead of a flex
+     basis of 0 with no room to grow into -- which is what was collapsing
+     it down to a sliver. */
+  .pdf-canvas-wrap {
+    flex: 0 0 auto;
+    width: 100%;
+    max-width: 100%;
+  }
 }
