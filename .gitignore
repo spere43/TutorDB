@@ -1,0 +1,10 @@
+# Data - never commit actual papers/questions/db (private content + would bloat the repo)
+data/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store

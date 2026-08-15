@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TutorDB</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <h1>TutorDB</h1>
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="browse">Browse</button>
+    <button class="tab-btn" data-tab="add">Add Paper</button>
+    <button class="tab-btn" data-tab="chop">Chop</button>
+  </nav>
+</header>
+
+<main>
+
+  <!-- ===================== BROWSE TAB ===================== -->
+  <section id="tab-browse" class="tab-panel active">
+    <div class="filter-bar">
+      <select id="f-subject"><option value="">Subject: any</option></select>
+      <select id="f-school"><option value="">School: any</option></select>
+      <select id="f-topic"><option value="">Topic: any</option></select>
+      <select id="f-difficulty">
+        <option value="">Difficulty: any</option>
+        <option value="SF">SF</option>
+        <option value="CF">CF</option>
+        <option value="CU">CU</option>
+      </select>
+      <select id="f-exam-type">
+        <option value="">Exam type: any</option>
+        <option value="internal">Internal</option>
+        <option value="mock">Mock</option>
+        <option value="QCAA">QCAA-style</option>
+      </select>
+      <input id="f-tags" type="text" placeholder="tags (comma separated)">
+      <button id="apply-filters">Filter</button>
+      <button id="clear-filters" class="secondary">Clear</button>
+    </div>
+
+    <div id="results-count" class="muted"></div>
+    <div id="results-grid" class="results-grid"></div>
+  </section>
+
+  <!-- ===================== ADD PAPER TAB ===================== -->
+  <section id="tab-add" class="tab-panel">
+    <h2>Add a paper</h2>
+    <form id="add-paper-form">
+      <label>School
+        <input list="school-list" id="p-school" required>
+        <datalist id="school-list"></datalist>
+      </label>
+
+      <label>Subject
+        <input list="subject-list" id="p-subject" required>
+        <datalist id="subject-list"></datalist>
+      </label>
+
+      <label>Year level
+        <select id="p-year-level" required>
+          <option value="11">11</option>
+          <option value="12">12</option>
+        </select>
+      </label>
+
+      <label>Exam type
+        <select id="p-exam-type" required>
+          <option value="internal">Internal</option>
+          <option value="mock">Mock</option>
+          <option value="QCAA">QCAA-style</option>
+        </select>
+      </label>
+
+      <label>Exam year (optional)
+        <input type="number" id="p-exam-year" min="2000" max="2100">
+      </label>
+
+      <label>Original paper file (PDF/doc)
+        <input type="file" id="p-file" accept=".pdf,.doc,.docx" required>
+      </label>
+
+      <label>Solutions file (optional)
+        <input type="file" id="p-solution-file" accept=".pdf,.doc,.docx">
+      </label>
+
+      <button type="submit">Add paper</button>
+    </form>
+    <div id="add-paper-status" class="status-msg"></div>
+
+    <h2>Existing papers</h2>
+    <div id="papers-list"></div>
+  </section>
+
+  <!-- ===================== CHOP TAB ===================== -->
+  <section id="tab-chop" class="tab-panel">
+    <div id="chop-picker">
+      <h2>Choose a paper to chop</h2>
+      <div id="chop-papers-list"></div>
+    </div>
+
+    <div id="chop-workspace" style="display:none;">
+      <div class="chop-toolbar">
+        <button id="chop-back" class="secondary">&larr; Choose different paper</button>
+        <span id="chop-paper-title" class="muted"></span>
+        <div class="page-nav">
+          <button id="prev-page">&lt;</button>
+          <span id="page-indicator">Page 1 / 1</span>
+          <button id="next-page">&gt;</button>
+        </div>
+      </div>
+
+      <div class="chop-main">
+        <div class="pdf-canvas-wrap">
+          <canvas id="pdf-canvas"></canvas>
+          <canvas id="overlay-canvas"></canvas>
+        </div>
+
+        <div class="chop-form">
+          <p class="hint">Draw a box around a question on the page (click/tap and drag).</p>
+          <div id="crop-preview-wrap" style="display:none;">
+            <img id="crop-preview" alt="cropped question preview">
+          </div>
+
+          <label>Question number
+            <input type="text" id="q-number" placeholder="e.g. 4b">
+          </label>
+
+          <label>Topic
+            <input list="topic-list" id="q-topic" required>
+            <datalist id="topic-list"></datalist>
+          </label>
+
+          <label>Subtopic (optional)
+            <input type="text" id="q-subtopic">
+          </label>
+
+          <label>Difficulty</label>
+          <div class="difficulty-buttons">
+            <button type="button" class="diff-btn" data-diff="SF">SF</button>
+            <button type="button" class="diff-btn" data-diff="CF">CF</button>
+            <button type="button" class="diff-btn" data-diff="CU">CU</button>
+          </div>
+
+          <label>Tags (comma separated)
+            <input type="text" id="q-tags" placeholder="e.g. unique, appeared_on_mock">
+          </label>
+
+          <label>Notes (optional)
+            <textarea id="q-notes" rows="2"></textarea>
+          </label>
+
+          <button id="save-question" disabled>Save question</button>
+          <div id="chop-status" class="status-msg"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
