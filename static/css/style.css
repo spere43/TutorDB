@@ -291,10 +291,12 @@ form#add-paper-form {
   max-width: 100%;
   border: 1px solid var(--border); 
   border-radius: 8px; 
-  overflow: auto; /* Enable touch/scroll when zoomed in */
+  overflow: auto; 
   max-height: 80vh; 
   background: #2b2e35; 
-  touch-action: pan-x pan-y; /* Allows smooth scrolling outside bounding box drag */
+  /* iOS Safari Touch Fixes */
+  -webkit-overflow-scrolling: touch; 
+  touch-action: pan-x pan-y;
 }
 
 #pdf-canvas {
@@ -306,7 +308,7 @@ form#add-paper-form {
   position: absolute;
   top: 0;
   left: 0;
-  touch-action: none; /* Capture custom dragging on overlay */
+  touch-action: none; /* Prevents touch dragging from triggering page zoom/scroll */
   cursor: crosshair;
 }
 

@@ -191,6 +191,12 @@ async function renderPage(num) {
   overlayCanvas.width = viewport.width;
   overlayCanvas.height = viewport.height;
 
+  // FIX FOR IPHONE ZOOM/SCROLL BUG: Lock display styles explicitly
+  pdfCanvas.style.width = viewport.width + 'px';
+  pdfCanvas.style.height = viewport.height + 'px';
+  overlayCanvas.style.width = viewport.width + 'px';
+  overlayCanvas.style.height = viewport.height + 'px';
+
   // Render PDF content onto PDF Canvas
   const ctx = pdfCanvas.getContext("2d");
   await page.render({ canvasContext: ctx, viewport }).promise;
