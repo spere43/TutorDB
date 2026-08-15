@@ -149,16 +149,21 @@ let currentPaperId = null;
 let selectedDifficulty = null;
 let pendingCropBlob = null;
 
-// baseScale = the PDF.js scale that makes the page exactly fill the
-// available width on THIS device. zoomLevel is a multiplier the user
-// can adjust on top of that with the +/-/Fit controls. This is what
-// makes the page look the same relative size on phone, iPad and desktop,
-// instead of one fixed "scale" that's too big on small screens.
-let baseScale = 1;
-let zoomLevel = 1;
-const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 3;
-const ZOOM_STEP = 0.15;
+// `scale` is an ABSOLUTE PDF.js scale: 1.0 always means "1 PDF point = 1 CSS
+// pixel" (the PDF's real, native size), the same on every device. That's
+// what makes the zoom % label mean something consistent everywhere --
+// unlike a scale that's defined relative to the container's current width,
+// which shifts every time the container resizes (as it constantly does in
+// iOS Safari: address-bar collapse, rotation, etc).
+let scale = 1;
+const MIN_SCALE = 0.3;
+const MAX_SCALE = 4;
+const ZOOM_STEP_FACTOR = 1.15;
+
+// Whether the user has manually zoomed since the last Fit. If they have,
+// we leave their chosen zoom alone on resize/rotate instead of yanking it
+// back to a "fit" value they didn't ask for.
+let userZoomed = false;
 
 async function openChop(paperId, filePath, title) {
   currentPaperId = paperId;
@@ -169,25 +174,25 @@ async function openChop(paperId, filePath, title) {
   const loadingTask = pdfjsLib.getDocument(`/files/${filePath}`);
   pdfDoc = await loadingTask.promise;
   currentPage = 1;
-  zoomLevel = 1;
-  await computeBaseScale();
+  userZoomed = false;
+  await fitToWidth();
   await renderPage(currentPage);
   resetQuestionForm();
 }
 
-// Figures out the scale needed so the page width matches the container
-// width available on this device/orientation right now.
-async function computeBaseScale() {
+// Sets `scale` to whatever absolute value makes the page fill the
+// container's current width. Used for the initial view and the Fit button
+// only -- it does NOT define what "100%" means (that's always native size).
+async function fitToWidth() {
   const page = await pdfDoc.getPage(currentPage);
   const unscaledViewport = page.getViewport({ scale: 1 });
   const wrap = document.getElementById("pdf-canvas-wrap");
   const available = Math.max(200, wrap.clientWidth - 4);
-  baseScale = available / unscaledViewport.width;
+  scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, available / unscaledViewport.width));
 }
 
 async function renderPage(num) {
   const page = await pdfDoc.getPage(num);
-  const scale = baseScale * zoomLevel;
   const viewport = page.getViewport({ scale });
 
   // Render at the device's actual pixel density so it's crisp on
@@ -214,51 +219,52 @@ async function renderPage(num) {
   await page.render(renderContext).promise;
 
   document.getElementById("page-indicator").textContent = `Page ${num} / ${pdfDoc.numPages}`;
-  document.getElementById("zoom-indicator").textContent = `${Math.round(zoomLevel * 100)}%`;
+  document.getElementById("zoom-indicator").textContent = `${Math.round(scale * 100)}%`;
   clearOverlay();
 }
 
 document.getElementById("prev-page").addEventListener("click", async () => {
   if (currentPage > 1) {
     currentPage--;
-    await computeBaseScale();
-    await renderPage(currentPage);
+    await renderPage(currentPage); // keep the same absolute zoom across pages
   }
 });
 document.getElementById("next-page").addEventListener("click", async () => {
   if (pdfDoc && currentPage < pdfDoc.numPages) {
     currentPage++;
-    await computeBaseScale();
     await renderPage(currentPage);
   }
 });
 
 document.getElementById("zoom-in").addEventListener("click", async () => {
   if (!pdfDoc) return;
-  zoomLevel = Math.min(MAX_ZOOM, +(zoomLevel + ZOOM_STEP).toFixed(2));
+  userZoomed = true;
+  scale = Math.min(MAX_SCALE, +(scale * ZOOM_STEP_FACTOR).toFixed(3));
   await renderPage(currentPage);
 });
 document.getElementById("zoom-out").addEventListener("click", async () => {
   if (!pdfDoc) return;
-  zoomLevel = Math.max(MIN_ZOOM, +(zoomLevel - ZOOM_STEP).toFixed(2));
+  userZoomed = true;
+  scale = Math.max(MIN_SCALE, +(scale / ZOOM_STEP_FACTOR).toFixed(3));
   await renderPage(currentPage);
 });
 document.getElementById("zoom-fit").addEventListener("click", async () => {
   if (!pdfDoc) return;
-  zoomLevel = 1;
-  await computeBaseScale();
+  userZoomed = false;
+  await fitToWidth();
   await renderPage(currentPage);
 });
 
 // Re-fit when the device rotates or the window/container is resized,
 // so switching from portrait to landscape on iPad doesn't leave the
-// page mis-sized. Only re-fits if the user hasn't manually zoomed.
+// page mis-sized. Only re-fits if the user hasn't manually zoomed since
+// the last Fit -- otherwise their chosen zoom % stays exactly as set.
 let resizeTimer = null;
 window.addEventListener("resize", () => {
-  if (!pdfDoc || zoomLevel !== 1) return;
+  if (!pdfDoc || userZoomed) return;
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(async () => {
-    await computeBaseScale();
+    await fitToWidth();
     await renderPage(currentPage);
   }, 200);
 });
