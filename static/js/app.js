@@ -160,11 +160,6 @@ const MIN_SCALE = 0.3;
 const MAX_SCALE = 4;
 const ZOOM_STEP_FACTOR = 1.15;
 
-// Whether the user has manually zoomed since the last Fit. If they have,
-// we leave their chosen zoom alone on resize/rotate instead of yanking it
-// back to a "fit" value they didn't ask for.
-let userZoomed = false;
-
 async function openChop(paperId, filePath, title) {
   currentPaperId = paperId;
   document.getElementById("chop-picker").style.display = "none";
@@ -174,7 +169,6 @@ async function openChop(paperId, filePath, title) {
   const loadingTask = pdfjsLib.getDocument(`/files/${filePath}`);
   pdfDoc = await loadingTask.promise;
   currentPage = 1;
-  userZoomed = false;
   await fitToWidth();
   await renderPage(currentPage);
   resetQuestionForm();
@@ -238,36 +232,26 @@ document.getElementById("next-page").addEventListener("click", async () => {
 
 document.getElementById("zoom-in").addEventListener("click", async () => {
   if (!pdfDoc) return;
-  userZoomed = true;
   scale = Math.min(MAX_SCALE, +(scale * ZOOM_STEP_FACTOR).toFixed(3));
   await renderPage(currentPage);
 });
 document.getElementById("zoom-out").addEventListener("click", async () => {
   if (!pdfDoc) return;
-  userZoomed = true;
   scale = Math.max(MIN_SCALE, +(scale / ZOOM_STEP_FACTOR).toFixed(3));
   await renderPage(currentPage);
 });
 document.getElementById("zoom-fit").addEventListener("click", async () => {
   if (!pdfDoc) return;
-  userZoomed = false;
   await fitToWidth();
   await renderPage(currentPage);
 });
 
-// Re-fit when the device rotates or the window/container is resized,
-// so switching from portrait to landscape on iPad doesn't leave the
-// page mis-sized. Only re-fits if the user hasn't manually zoomed since
-// the last Fit -- otherwise their chosen zoom % stays exactly as set.
-let resizeTimer = null;
-window.addEventListener("resize", () => {
-  if (!pdfDoc || userZoomed) return;
-  clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(async () => {
-    await fitToWidth();
-    await renderPage(currentPage);
-  }, 200);
-});
+// Note: we deliberately do NOT auto-refit on window "resize". iOS Safari
+// fires resize events constantly during ordinary scrolling (its address
+// bar collapses/expands), which was silently nudging the zoom % by a few
+// points every time you scrolled. Refitting only happens when you open a
+// paper or explicitly tap "Fit" -- after rotating the device, just tap
+// Fit again if the page no longer looks right.
 
 // ---- Box drawing on overlay canvas (mouse + touch) ----
 const overlay = document.getElementById("overlay-canvas");
@@ -281,8 +265,23 @@ function clearOverlay() {
 
 function getPos(evt) {
   const rect = overlay.getBoundingClientRect();
-  const clientX = evt.touches ? evt.touches[0].clientX : evt.clientX;
-  const clientY = evt.touches ? evt.touches[0].clientY : evt.clientY;
+  // On touchend/touchcancel, evt.touches is already empty (the finger has
+  // lifted) -- the touch that just ended lives in evt.changedTouches
+  // instead. Using evt.touches here made endDraw() read undefined
+  // coordinates on every touch device, silently throwing before
+  // cropSelection() ever ran -- which is why the box drew fine but no
+  // preview ever appeared on iPhone/iPad.
+  let clientX, clientY;
+  if (evt.changedTouches && evt.changedTouches.length) {
+    clientX = evt.changedTouches[0].clientX;
+    clientY = evt.changedTouches[0].clientY;
+  } else if (evt.touches && evt.touches.length) {
+    clientX = evt.touches[0].clientX;
+    clientY = evt.touches[0].clientY;
+  } else {
+    clientX = evt.clientX;
+    clientY = evt.clientY;
+  }
   return {
     x: (clientX - rect.left) * (overlay.width / rect.width),
     y: (clientY - rect.top) * (overlay.height / rect.height),

@@ -303,7 +303,10 @@ form#add-paper-form {
 
 .pdf-canvas-wrap {
   position: relative;
-  flex: 1 1 500px;
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: auto;
