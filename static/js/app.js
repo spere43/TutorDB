@@ -149,8 +149,10 @@ let currentPaperId = null;
 let scale = 1.4;
 let selectedDifficulty = null;
 let pendingCropBlob = null;
+
 let currentScale = 1.0;
-let userScaleOverride = null; // Track manual zoom adjustments
+let userScaleOverride = null;
+let lastWindowWidth = window.innerWidth; // Track actual screen width changes
 
 async function openChop(paperId, filePath, title) {
   currentPaperId = paperId;
@@ -176,28 +178,28 @@ async function renderPage(num) {
   // Get base PDF dimensions at scale = 1.0
   const unscaledViewport = page.getViewport({ scale: 1.0 });
 
-  // Calculate fit-to-width scale based on screen/container size
-  const containerWidth = container.clientWidth - 20; // 20px padding margin
-  const autoScale = containerWidth / unscaledViewport.width;
+  // Fallback to window width if container hasn't laid out yet
+  const availableWidth = container.clientWidth > 0 ? container.clientWidth - 24 : window.innerWidth - 32;
+  const autoScale = Math.max(0.3, availableWidth / unscaledViewport.width); // Prevent negative/tiny scale
 
-  // Use user manual scale if set; otherwise, use responsive autoScale
+  // Use manual zoom if set; otherwise use bounded autoScale
   currentScale = userScaleOverride || autoScale;
 
   const viewport = page.getViewport({ scale: currentScale });
 
-  // Size both canvases to match viewport dimensions exactly
-  pdfCanvas.width = viewport.width;
-  pdfCanvas.height = viewport.height;
-  overlayCanvas.width = viewport.width;
-  overlayCanvas.height = viewport.height;
+  // 1. Internal resolution attributes (PDF sharp rendering)
+  pdfCanvas.width = Math.floor(viewport.width);
+  pdfCanvas.height = Math.floor(viewport.height);
+  overlayCanvas.width = Math.floor(viewport.width);
+  overlayCanvas.height = Math.floor(viewport.height);
 
-  // FIX FOR IPHONE ZOOM/SCROLL BUG: Lock display styles explicitly
-  pdfCanvas.style.width = viewport.width + 'px';
-  pdfCanvas.style.height = viewport.height + 'px';
-  overlayCanvas.style.width = viewport.width + 'px';
-  overlayCanvas.style.height = viewport.height + 'px';
+  // 2. Explicit CSS display dimensions (Stops iOS layout snapping)
+  pdfCanvas.style.width = Math.floor(viewport.width) + "px";
+  pdfCanvas.style.height = Math.floor(viewport.height) + "px";
+  overlayCanvas.style.width = Math.floor(viewport.width) + "px";
+  overlayCanvas.style.height = Math.floor(viewport.height) + "px";
 
-  // Render PDF content onto PDF Canvas
+  // Render PDF content
   const ctx = pdfCanvas.getContext("2d");
   await page.render({ canvasContext: ctx, viewport }).promise;
 
@@ -229,8 +231,11 @@ document.getElementById("zoom-fit").addEventListener("click", async () => {
 
 // Re-render automatically on window/screen orientation change
 window.addEventListener("resize", () => {
-  if (pdfDoc && !userScaleOverride) {
-    renderPage(currentPage);
+  if (window.innerWidth !== lastWindowWidth) {
+    lastWindowWidth = window.innerWidth;
+    if (pdfDoc && !userScaleOverride) {
+      renderPage(currentPage);
+    }
   }
 });
 
