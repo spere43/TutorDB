@@ -170,17 +170,73 @@ document.getElementById("add-paper-form").addEventListener("submit", async (e) =
   }
 });
 
-let papersListCache = [];
+// Quick add: for a one-off circulating screenshot/question that isn't
+// really "a paper" -- skips straight to chopping instead of landing back
+// on this tab, since speed is the whole point.
+document.getElementById("quick-add-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const statusEl = document.getElementById("quick-add-status");
+  const subject = document.getElementById("qa-subject").value.trim();
+  const file = document.getElementById("qa-file").files[0];
 
-async function refreshPapersList() {
-  const papers = await fetchJSON("/api/papers");
-  papersListCache = papers;
-  const el = document.getElementById("papers-list");
-  if (papers.length === 0) {
-    el.innerHTML = `<p class="muted">No papers added yet.</p>`;
+  if (!subject || !file) {
+    statusEl.textContent = "Subject and a file are required.";
+    statusEl.className = "status-msg err";
     return;
   }
-  el.innerHTML = papers.map(p => `
+
+  statusEl.textContent = "Adding...";
+  statusEl.className = "status-msg";
+
+  const formData = new FormData();
+  formData.append("subject", subject);
+  formData.append("file", file);
+
+  try {
+    const paper = await fetchJSON("/api/papers/quick", { method: "POST", body: formData });
+    document.getElementById("quick-add-form").reset();
+    statusEl.textContent = "";
+    loadDropdownData();
+    refreshPapersList(); // keep the background list in sync for when they come back
+
+    // jump straight to the Chop tab, workspace open on this paper
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+    document.querySelector('.tab-btn[data-tab="chop"]').classList.add("active");
+    document.getElementById("tab-chop").classList.add("active");
+    await openChop(paper);
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+    statusEl.className = "status-msg err";
+  }
+});
+
+let papersListCache = [];
+
+// Groups papers by subject and renders them under subject headings, so
+// the list stays scannable as it grows. `filterSubject` (empty = all)
+// narrows to one subject; `rowRenderer` produces each paper's own row
+// markup, since the Add Paper list and Chop picker use different row
+// templates for the same underlying data.
+function renderGroupedPapers(papers, filterSubject, rowRenderer, emptyMessage) {
+  const filtered = filterSubject ? papers.filter(p => p.subject === filterSubject) : papers;
+  if (filtered.length === 0) {
+    return `<p class="muted">${emptyMessage}</p>`;
+  }
+  const groups = {};
+  filtered.forEach(p => {
+    if (!groups[p.subject]) groups[p.subject] = [];
+    groups[p.subject].push(p);
+  });
+  const subjects = Object.keys(groups).sort();
+  return subjects.map(subj => `
+    <h4 class="paper-group-heading">${escapeHtml(subj)} <span class="muted">(${groups[subj].length})</span></h4>
+    ${groups[subj].map(rowRenderer).join("")}
+  `).join("");
+}
+
+function paperRowTemplate(p) {
+  return `
     <div class="paper-row-wrap">
       <div class="paper-row">
         <div class="paper-info">
@@ -194,8 +250,23 @@ async function refreshPapersList() {
       </div>
       <div class="paper-edit-form" id="paper-edit-${p.id}" style="display:none;"></div>
     </div>
-  `).join("");
+  `;
 }
+
+async function refreshPapersList() {
+  const papers = await fetchJSON("/api/papers");
+  papersListCache = papers;
+  populateSelect("papers-subject-filter", [...new Set(papers.map(p => p.subject))].sort(), "All subjects");
+  renderPapersListFiltered();
+}
+
+function renderPapersListFiltered() {
+  const filterSubject = document.getElementById("papers-subject-filter").value;
+  document.getElementById("papers-list").innerHTML =
+    renderGroupedPapers(papersListCache, filterSubject, paperRowTemplate, "No papers added yet.");
+}
+
+document.getElementById("papers-subject-filter").addEventListener("change", renderPapersListFiltered);
 
 // Lets you fix/backfill a paper's metadata -- e.g. set "unit" on a paper
 // added before that field existed -- without touching the uploaded file
@@ -275,17 +346,8 @@ async function deletePaper(id) {
 // ---------------------------------------------------------------
 // CHOP TAB
 // ---------------------------------------------------------------
-async function refreshChopPicker() {
-  document.getElementById("chop-workspace").style.display = "none";
-  document.getElementById("chop-picker").style.display = "block";
-  const papers = await fetchJSON("/api/papers");
-  papersCache = papers;
-  const el = document.getElementById("chop-papers-list");
-  if (papers.length === 0) {
-    el.innerHTML = `<p class="muted">No papers yet — add one in the Add Paper tab first.</p>`;
-    return;
-  }
-  el.innerHTML = papers.map(p => `
+function chopPaperRowTemplate(p) {
+  return `
     <div class="paper-row">
       <div class="paper-info">
         <b>${escapeHtml(p.school)}</b> — ${escapeHtml(p.subject)} (Y${p.year_level}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""})
@@ -293,9 +355,27 @@ async function refreshChopPicker() {
       </div>
       <button onclick="openChopById(${p.id})">Chop this paper</button>
     </div>
-  `).join("");
+  `;
 }
 
+async function refreshChopPicker() {
+  document.getElementById("chop-workspace").style.display = "none";
+  document.getElementById("chop-picker").style.display = "block";
+  const papers = await fetchJSON("/api/papers");
+  papersCache = papers;
+  populateSelect("chop-subject-filter", [...new Set(papers.map(p => p.subject))].sort(), "All subjects");
+  renderChopPickerFiltered();
+}
+
+function renderChopPickerFiltered() {
+  const filterSubject = document.getElementById("chop-subject-filter").value;
+  document.getElementById("chop-papers-list").innerHTML = renderGroupedPapers(
+    papersCache, filterSubject, chopPaperRowTemplate,
+    papersCache.length === 0 ? "No papers yet — add one in the Add Paper tab first." : "No papers for this subject."
+  );
+}
+
+document.getElementById("chop-subject-filter").addEventListener("change", renderChopPickerFiltered);
 document.getElementById("chop-back").addEventListener("click", refreshChopPicker);
 
 let papersCache = [];

@@ -240,6 +240,51 @@ def create_paper():
     return jsonify(paper.to_dict()), 201
 
 
+# Placeholder values used for quick-add papers -- these aren't meant to be
+# meaningful, just a consistent, recognizable stand-in so quick-added
+# papers are easy to spot in listings (and easy to backfill with real
+# details later via the normal paper Edit form, if it's ever worth it).
+QUICK_ADD_SCHOOL = "Uncategorized"
+QUICK_ADD_EXAM_TYPE = "misc"
+QUICK_ADD_YEAR_LEVEL = 12
+
+
+@app.route("/api/papers/quick", methods=["POST"])
+def create_paper_quick():
+    """
+    Fast path for a one-off circulating question/screenshot that isn't
+    really "a paper" you're tracking -- skips school/year-level/exam-type
+    entirely (filled with placeholder values) so you can go straight from
+    screenshot to chopping. Expects multipart/form-data: subject, file.
+    Reusable indefinitely -- not a one-time/temporary thing.
+    """
+    subject = request.form.get("subject")
+    if not subject:
+        return jsonify({"error": "subject is required"}), 400
+
+    if "file" not in request.files or request.files["file"].filename == "":
+        return jsonify({"error": "file is required"}), 400
+
+    file = request.files["file"]
+    if not allowed_file(file.filename):
+        return jsonify({"error": "file type not allowed"}), 400
+
+    file_path = save_upload(file, subfolder=secure_filename(subject))
+
+    paper = Paper(
+        school=QUICK_ADD_SCHOOL,
+        subject=subject,
+        year_level=QUICK_ADD_YEAR_LEVEL,
+        exam_type=QUICK_ADD_EXAM_TYPE,
+        exam_year=None,
+        file_path=file_path,
+        solution_file_path=None,
+    )
+    db.session.add(paper)
+    db.session.commit()
+    return jsonify(paper.to_dict()), 201
+
+
 @app.route("/api/papers/<int:paper_id>", methods=["PATCH"])
 def update_paper(paper_id):
     """Partial update for a paper's metadata (school, subject, year_level,

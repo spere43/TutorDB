@@ -94,7 +94,23 @@
     </form>
     <div id="add-paper-status" class="status-msg"></div>
 
+    <div class="quick-add-box">
+      <h3>Quick add a circulating question/screenshot</h3>
+      <p class="hint">For a one-off question that isn't from a specific paper you're tracking -- skips the usual details and goes straight to chopping.</p>
+      <form id="quick-add-form">
+        <label>Subject
+          <input list="subject-list" id="qa-subject" required>
+        </label>
+        <label>Image or file
+          <input type="file" id="qa-file" accept=".pdf,.doc,.docx,.png,.jpg,.jpeg" required>
+        </label>
+        <button type="submit">Add &amp; start chopping</button>
+      </form>
+      <div id="quick-add-status" class="status-msg"></div>
+    </div>
+
     <h2>Existing papers</h2>
+    <select id="papers-subject-filter"><option value="">All subjects</option></select>
     <div id="papers-list"></div>
   </section>
 
@@ -102,6 +118,7 @@
   <section id="tab-chop" class="tab-panel">
     <div id="chop-picker">
       <h2>Choose a paper to chop</h2>
+      <select id="chop-subject-filter"><option value="">All subjects</option></select>
       <div id="chop-papers-list"></div>
     </div>
 
