@@ -150,7 +150,6 @@ document.getElementById("add-paper-form").addEventListener("submit", async (e) =
   formData.append("school", document.getElementById("p-school").value);
   formData.append("subject", document.getElementById("p-subject").value);
   formData.append("year_level", document.getElementById("p-year-level").value);
-  formData.append("unit", document.getElementById("p-unit").value);
   formData.append("exam_type", document.getElementById("p-exam-type").value);
   const examYear = document.getElementById("p-exam-year").value;
   if (examYear) formData.append("exam_year", examYear);
@@ -185,8 +184,7 @@ async function refreshPapersList() {
     <div class="paper-row-wrap">
       <div class="paper-row">
         <div class="paper-info">
-          <b>${escapeHtml(p.school)}</b> — ${escapeHtml(p.subject)} (Y${p.year_level}${p.unit ? ", Unit " + p.unit : ""}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""})
-          ${!p.unit ? `<span class="no-unit-flag">no unit set</span>` : ""}
+          <b>${escapeHtml(p.school)}</b> — ${escapeHtml(p.subject)} (Y${p.year_level}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""})
           <br><span><a href="/files/${p.file_path}" target="_blank">view original</a>${p.solution_file_path ? ` | <a href="/files/${p.solution_file_path}" target="_blank">view solutions</a>` : ""}</span>
         </div>
         <div class="paper-row-actions">
@@ -226,15 +224,6 @@ function togglePaperEdit(id) {
         <option value="12" ${p.year_level === 12 ? "selected" : ""}>12</option>
       </select>
     </label>
-    <label>Unit
-      <select id="edit-unit-${id}">
-        <option value="" ${!p.unit ? "selected" : ""}>No unit set</option>
-        <option value="1" ${p.unit === 1 ? "selected" : ""}>Unit 1</option>
-        <option value="2" ${p.unit === 2 ? "selected" : ""}>Unit 2</option>
-        <option value="3" ${p.unit === 3 ? "selected" : ""}>Unit 3</option>
-        <option value="4" ${p.unit === 4 ? "selected" : ""}>Unit 4</option>
-      </select>
-    </label>
     <label>Exam type
       <select id="edit-examtype-${id}">
         <option value="internal" ${p.exam_type === "internal" ? "selected" : ""}>Internal</option>
@@ -265,7 +254,6 @@ async function savePaperEdit(id) {
         school: document.getElementById(`edit-school-${id}`).value.trim(),
         subject: document.getElementById(`edit-subject-${id}`).value.trim(),
         year_level: document.getElementById(`edit-year-${id}`).value,
-        unit: document.getElementById(`edit-unit-${id}`).value || null,
         exam_type: document.getElementById(`edit-examtype-${id}`).value,
         exam_year: document.getElementById(`edit-examyear-${id}`).value || null,
       }),
@@ -300,7 +288,7 @@ async function refreshChopPicker() {
   el.innerHTML = papers.map(p => `
     <div class="paper-row">
       <div class="paper-info">
-        <b>${escapeHtml(p.school)}</b> — ${escapeHtml(p.subject)} (Y${p.year_level}${p.unit ? ", Unit " + p.unit : ""}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""})
+        <b>${escapeHtml(p.school)}</b> — ${escapeHtml(p.subject)} (Y${p.year_level}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""})
         ${p.solution_file_path ? `<br><span class="muted">Has a solutions file</span>` : ""}
       </div>
       <button onclick="openChopById(${p.id})">Chop this paper</button>
@@ -352,8 +340,7 @@ async function openChop(paper) {
 
   document.getElementById("chop-picker").style.display = "none";
   document.getElementById("chop-workspace").style.display = "block";
-  document.getElementById("chop-paper-title").textContent =
-    `${paper.school} — ${paper.subject}${paper.unit ? " (Unit " + paper.unit + ")" : ""}`;
+  document.getElementById("chop-paper-title").textContent = `${paper.school} — ${paper.subject}`;
 
   const modeSwitch = document.getElementById("chop-mode-switch");
   document.querySelectorAll(".mode-btn").forEach(b => b.classList.remove("active"));
@@ -361,42 +348,49 @@ async function openChop(paper) {
   modeSwitch.style.display = paper.solution_file_path ? "flex" : "none";
   showChopFormForMode();
 
-  await loadTopicsForCurrentPaper();
+  document.getElementById("q-unit").value = "";
+  populateDatalist("topic-list", []);
+  populateDatalist("subtopic-list", []);
+
   await loadPdfForMode();
   resetQuestionForm();
   resetAnswerForm();
 }
 
-// Scopes the topic datalist to this paper's subject+unit (instead of a
-// global list of every topic ever chopped) -- this is what makes typing
-// into "Topic" while chopping only suggest topics that actually belong
-// to the subject/unit you're working in.
-async function loadTopicsForCurrentPaper() {
-  if (!currentPaper || !currentPaper.unit) {
+// Unit lives on the QUESTION, not the paper -- a single paper (especially
+// an older-syllabus one) can genuinely contain content from more than one
+// unit, so it's picked per-question here rather than inherited from the
+// paper. Topics are then scoped to (paper's subject, this question's
+// chosen unit) instead of a global list.
+document.getElementById("q-unit").addEventListener("change", async () => {
+  const unit = document.getElementById("q-unit").value;
+  if (!currentPaper || !unit) {
     populateDatalist("topic-list", []);
     populateDatalist("subtopic-list", []);
     return;
   }
   const topics = await fetchJSON(
-    `/api/topics?subject=${encodeURIComponent(currentPaper.subject)}&unit=${encodeURIComponent(currentPaper.unit)}`
+    `/api/topics?subject=${encodeURIComponent(currentPaper.subject)}&unit=${encodeURIComponent(unit)}`
   );
   populateDatalist("topic-list", topics);
   populateDatalist("subtopic-list", []); // repopulated once a topic is entered
-}
+});
 
 // Debounced: refreshes the subtopic datalist to match whatever topic
-// value is currently typed/selected, scoped to this paper's subject+unit.
+// value is currently typed/selected, scoped to this paper's subject +
+// whichever unit is picked for this question.
 let subtopicFetchTimer = null;
 document.getElementById("q-topic").addEventListener("input", () => {
   clearTimeout(subtopicFetchTimer);
   subtopicFetchTimer = setTimeout(async () => {
     const topic = document.getElementById("q-topic").value.trim();
-    if (!currentPaper || !currentPaper.unit || !topic) {
+    const unit = document.getElementById("q-unit").value;
+    if (!currentPaper || !unit || !topic) {
       populateDatalist("subtopic-list", []);
       return;
     }
     const subtopics = await fetchJSON(
-      `/api/subtopics?subject=${encodeURIComponent(currentPaper.subject)}&unit=${encodeURIComponent(currentPaper.unit)}&topic=${encodeURIComponent(topic)}`
+      `/api/subtopics?subject=${encodeURIComponent(currentPaper.subject)}&unit=${encodeURIComponent(unit)}&topic=${encodeURIComponent(topic)}`
     );
     populateDatalist("subtopic-list", subtopics);
   }, 250);
@@ -732,10 +726,16 @@ async function uploadParts(questionId, endpoint, fileField, parts) {
 document.getElementById("save-question").addEventListener("click", async () => {
   const statusEl = document.getElementById("chop-status");
   const topic = document.getElementById("q-topic").value.trim();
+  const unit = document.getElementById("q-unit").value;
 
   const parts = [...stagedQuestionParts];
   if (pendingCropBlob) parts.push({ blob: pendingCropBlob, page: pendingCropPage });
 
+  if (!unit) {
+    statusEl.textContent = "Pick a unit (1-4).";
+    statusEl.className = "status-msg err";
+    return;
+  }
   if (!topic) {
     statusEl.textContent = "Topic is required.";
     statusEl.className = "status-msg err";
@@ -765,6 +765,7 @@ document.getElementById("save-question").addEventListener("click", async () => {
       body: JSON.stringify({
         paper_id: currentPaperId,
         question_number: document.getElementById("q-number").value.trim() || null,
+        unit: parseInt(unit, 10),
         topic,
         subtopic: document.getElementById("q-subtopic").value.trim() || null,
         difficulty: selectedDifficulty,
@@ -908,11 +909,14 @@ function renderQuestionCard(q) {
 // list -- so prev/next arrows walk through whatever you've filtered to,
 // not the whole database.
 let modalIndex = -1;
+let modalEditing = false;
+let modalEditDifficulty = null;
 
 function openQuestionModal(id) {
   const idx = browseResultsCache.findIndex(q => q.id === id);
   if (idx === -1) return;
   modalIndex = idx;
+  modalEditing = false;
   document.getElementById("question-modal").style.display = "flex";
   document.body.style.overflow = "hidden";
   renderModalQuestion();
@@ -922,6 +926,7 @@ function closeQuestionModal() {
   document.getElementById("question-modal").style.display = "none";
   document.body.style.overflow = "";
   modalIndex = -1;
+  modalEditing = false;
 }
 
 function modalNav(delta) {
@@ -929,6 +934,7 @@ function modalNav(delta) {
   const next = modalIndex + delta;
   if (next < 0 || next >= browseResultsCache.length) return;
   modalIndex = next;
+  modalEditing = false; // don't carry an in-progress edit over to a different question
   renderModalQuestion();
 }
 
@@ -938,10 +944,18 @@ function renderModalQuestion() {
 
   document.getElementById("modal-position").textContent = `${modalIndex + 1} / ${browseResultsCache.length}`;
   document.getElementById("modal-meta").textContent =
-    `${q.school} · ${q.subject}${q.topic ? " · " + q.topic : ""}${q.subtopic ? " · " + q.subtopic : ""}`;
+    `${q.school} · ${q.subject}${q.unit ? " · Unit " + q.unit : ""}${q.topic ? " · " + q.topic : ""}${q.subtopic ? " · " + q.subtopic : ""}`;
   document.getElementById("modal-prev").disabled = modalIndex === 0;
   document.getElementById("modal-next").disabled = modalIndex === browseResultsCache.length - 1;
 
+  if (modalEditing) {
+    renderModalEditForm(q);
+  } else {
+    renderModalViewBody(q);
+  }
+}
+
+function renderModalViewBody(q) {
   const pages = q.question_images.map(img => `
     <div class="detail-page">
       ${img.page_number ? `<span class="detail-page-label">Page ${img.page_number}</span>` : ""}
@@ -953,6 +967,7 @@ function renderModalQuestion() {
     <div class="modal-question-meta">
       <span class="diff-tag ${q.difficulty}">${q.difficulty}</span>
       ${q.question_number ? `<span class="muted">Question ${escapeHtml(q.question_number)}</span>` : ""}
+      ${q.unit ? `<span class="tag-pill">Unit ${q.unit}</span>` : `<span class="tag-pill unit-missing">Unit not set</span>`}
       ${q.tags.map(t => `<span class="tag-pill">${escapeHtml(t)}</span>`).join("")}
     </div>
     ${pages || `<p class="muted">No crop image (page ${q.page_number || "?"})</p>`}
@@ -960,6 +975,163 @@ function renderModalQuestion() {
     <div class="answer-section" id="modal-answer-section"></div>
   `;
   renderAnswerSection();
+}
+
+// Edit form: lets you fix up unit/topic/subtopic/etc on a question you've
+// already chopped, without deleting and re-uploading it. This is what
+// retroactively assigning a unit (or correcting a topic under the new
+// syllabus) actually looks like for existing questions.
+function renderModalEditForm(q) {
+  modalEditDifficulty = q.difficulty;
+
+  document.getElementById("modal-body").innerHTML = `
+    <div id="modal-edit-form">
+      <label>Unit
+        <select id="modal-edit-unit">
+          <option value="">Choose a unit</option>
+          <option value="1">Unit 1</option>
+          <option value="2">Unit 2</option>
+          <option value="3">Unit 3</option>
+          <option value="4">Unit 4</option>
+        </select>
+      </label>
+
+      <label>Topic
+        <input type="text" id="modal-edit-topic" list="modal-edit-topic-list">
+        <datalist id="modal-edit-topic-list"></datalist>
+      </label>
+
+      <label>Subtopic (optional)
+        <input type="text" id="modal-edit-subtopic" list="modal-edit-subtopic-list">
+        <datalist id="modal-edit-subtopic-list"></datalist>
+      </label>
+
+      <label>Question number
+        <input type="text" id="modal-edit-number" placeholder="e.g. 4b">
+      </label>
+
+      <label>Difficulty</label>
+      <div class="difficulty-buttons">
+        <button type="button" class="diff-btn" data-diff="SF">SF</button>
+        <button type="button" class="diff-btn" data-diff="CF">CF</button>
+        <button type="button" class="diff-btn" data-diff="CU">CU</button>
+      </div>
+
+      <label>Tags (comma separated)
+        <input type="text" id="modal-edit-tags">
+      </label>
+
+      <label>Notes (optional)
+        <textarea id="modal-edit-notes" rows="2"></textarea>
+      </label>
+
+      <div class="modal-edit-actions">
+        <button type="button" id="modal-edit-save">Save changes</button>
+        <button type="button" id="modal-edit-cancel" class="secondary">Cancel</button>
+      </div>
+      <div id="modal-edit-status" class="status-msg"></div>
+    </div>
+  `;
+
+  document.getElementById("modal-edit-unit").value = q.unit || "";
+  document.getElementById("modal-edit-topic").value = q.topic || "";
+  document.getElementById("modal-edit-subtopic").value = q.subtopic || "";
+  document.getElementById("modal-edit-number").value = q.question_number || "";
+  document.getElementById("modal-edit-tags").value = q.tags.join(", ");
+  document.getElementById("modal-edit-notes").value = q.notes || "";
+
+  const form = document.getElementById("modal-edit-form");
+  form.querySelectorAll(".diff-btn").forEach(btn => {
+    if (btn.dataset.diff === q.difficulty) btn.classList.add("selected");
+    btn.addEventListener("click", () => {
+      form.querySelectorAll(".diff-btn").forEach(b => b.classList.remove("selected"));
+      btn.classList.add("selected");
+      modalEditDifficulty = btn.dataset.diff;
+    });
+  });
+
+  // Same subject+unit -> topic -> subtopic scoping as the chop form, so
+  // editing suggests topics that already exist for this subject/unit
+  // rather than a global list.
+  async function refreshEditTopics() {
+    const unit = document.getElementById("modal-edit-unit").value;
+    if (!unit) { populateDatalist("modal-edit-topic-list", []); return; }
+    const topics = await fetchJSON(`/api/topics?subject=${encodeURIComponent(q.subject)}&unit=${encodeURIComponent(unit)}`);
+    populateDatalist("modal-edit-topic-list", topics);
+  }
+  async function refreshEditSubtopics() {
+    const unit = document.getElementById("modal-edit-unit").value;
+    const topic = document.getElementById("modal-edit-topic").value.trim();
+    if (!unit || !topic) { populateDatalist("modal-edit-subtopic-list", []); return; }
+    const subtopics = await fetchJSON(`/api/subtopics?subject=${encodeURIComponent(q.subject)}&unit=${encodeURIComponent(unit)}&topic=${encodeURIComponent(topic)}`);
+    populateDatalist("modal-edit-subtopic-list", subtopics);
+  }
+  document.getElementById("modal-edit-unit").addEventListener("change", () => {
+    refreshEditTopics();
+    refreshEditSubtopics();
+  });
+  let editSubtopicTimer = null;
+  document.getElementById("modal-edit-topic").addEventListener("input", () => {
+    clearTimeout(editSubtopicTimer);
+    editSubtopicTimer = setTimeout(refreshEditSubtopics, 250);
+  });
+  refreshEditTopics();
+  refreshEditSubtopics();
+
+  document.getElementById("modal-edit-cancel").addEventListener("click", () => {
+    modalEditing = false;
+    renderModalQuestion();
+  });
+  document.getElementById("modal-edit-save").addEventListener("click", saveModalEdit);
+}
+
+async function saveModalEdit() {
+  const q = browseResultsCache[modalIndex];
+  const statusEl = document.getElementById("modal-edit-status");
+  const topic = document.getElementById("modal-edit-topic").value.trim();
+  const unit = document.getElementById("modal-edit-unit").value;
+
+  if (!topic) {
+    statusEl.textContent = "Topic is required.";
+    statusEl.className = "status-msg err";
+    return;
+  }
+  if (!modalEditDifficulty) {
+    statusEl.textContent = "Pick a difficulty (SF/CF/CU).";
+    statusEl.className = "status-msg err";
+    return;
+  }
+
+  statusEl.textContent = "Saving...";
+  statusEl.className = "status-msg";
+
+  const tags = document.getElementById("modal-edit-tags").value
+    .split(",").map(t => t.trim()).filter(Boolean);
+
+  try {
+    const updated = await fetchJSON(`/api/questions/${q.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        unit: unit ? parseInt(unit, 10) : null,
+        topic,
+        subtopic: document.getElementById("modal-edit-subtopic").value.trim() || null,
+        question_number: document.getElementById("modal-edit-number").value.trim() || null,
+        difficulty: modalEditDifficulty,
+        notes: document.getElementById("modal-edit-notes").value.trim() || null,
+        tags,
+      }),
+    });
+    browseResultsCache[modalIndex] = updated;
+    modalEditing = false;
+    renderModalQuestion();
+    // keep the grid behind the modal in sync without a full refetch
+    const grid = document.getElementById("results-grid");
+    if (grid) grid.innerHTML = browseResultsCache.map(renderQuestionCard).join("");
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+    statusEl.className = "status-msg err";
+  }
 }
 
 function renderAnswerSection() {
@@ -1060,6 +1232,11 @@ document.getElementById("modal-close").addEventListener("click", closeQuestionMo
 document.getElementById("modal-prev").addEventListener("click", () => modalNav(-1));
 document.getElementById("modal-next").addEventListener("click", () => modalNav(1));
 document.getElementById("modal-delete").addEventListener("click", deleteQuestionFromModal);
+document.getElementById("modal-edit").addEventListener("click", () => {
+  if (modalEditing) return; // already editing -- use Cancel/Save inside the form
+  modalEditing = true;
+  renderModalQuestion();
+});
 
 document.addEventListener("keydown", (e) => {
   if (document.getElementById("question-modal").style.display === "none") return;

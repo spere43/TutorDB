@@ -203,7 +203,7 @@ form#add-paper-form {
 .diff-tag.CF { background: var(--cf); }
 .diff-tag.CU { background: var(--cu); }
 
-.q-card .tag-pill {
+.tag-pill {
   display: inline-block;
   background: var(--panel-2);
   border: 1px solid var(--border);
@@ -212,6 +212,10 @@ form#add-paper-form {
   padding: 2px 8px;
   border-radius: 20px;
   margin: 2px 4px 0 0;
+}
+.tag-pill.unit-missing {
+  color: var(--cf, #ff9800);
+  border-color: var(--cf, #ff9800);
 }
 
 .q-card .card-actions {
@@ -316,17 +320,6 @@ button.small {
 .paper-row-wrap .paper-row { margin-bottom: 0; }
 
 .paper-row-actions { display: flex; gap: 6px; flex-shrink: 0; }
-
-.no-unit-flag {
-  display: inline-block;
-  font-size: 11px;
-  color: #e0a030;
-  background: rgba(224, 160, 48, 0.12);
-  border: 1px solid rgba(224, 160, 48, 0.4);
-  border-radius: 4px;
-  padding: 1px 6px;
-  margin-left: 6px;
-}
 
 .paper-edit-form {
   background: var(--panel);
@@ -629,6 +622,9 @@ button.small {
   .modal-nav-prev { left: 4px; }
   .modal-nav-next { right: 4px; }
 }
+
+#modal-edit-form { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+.modal-edit-actions { display: flex; gap: 8px; margin-top: 4px; }
 
 @media (max-width: 700px) {
   .chop-main { flex-direction: column; }

@@ -46,7 +46,6 @@ class Paper(db.Model):
     school = db.Column(db.String(120), nullable=False)
     subject = db.Column(db.String(80), nullable=False)
     year_level = db.Column(db.Integer, nullable=False)  # 11 or 12
-    unit = db.Column(db.Integer, nullable=True)  # QCE unit: 1, 2, 3, or 4 -- what topics get scoped under
     exam_type = db.Column(db.String(50), nullable=False)  # internal / mock / QCAA-style etc
     exam_year = db.Column(db.Integer, nullable=True)
     file_path = db.Column(db.String(300), nullable=False)  # path to original PDF/doc
@@ -61,7 +60,6 @@ class Paper(db.Model):
             "school": self.school,
             "subject": self.subject,
             "year_level": self.year_level,
-            "unit": self.unit,
             "exam_type": self.exam_type,
             "exam_year": self.exam_year,
             "file_path": self.file_path,
@@ -87,6 +85,7 @@ class Question(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     paper_id = db.Column(db.Integer, db.ForeignKey("papers.id"), nullable=False)
     question_number = db.Column(db.String(20), nullable=True)  # e.g. "4" or "4b"
+    unit = db.Column(db.Integer, nullable=True)  # QCE unit: 1, 2, 3, or 4
     topic = db.Column(db.String(120), nullable=False)
     subtopic = db.Column(db.String(120), nullable=True)
     difficulty = db.Column(db.String(2), nullable=False)  # SF / CF / CU
@@ -112,6 +111,7 @@ class Question(db.Model):
             "id": self.id,
             "paper_id": self.paper_id,
             "question_number": self.question_number,
+            "unit": self.unit,
             "topic": self.topic,
             "subtopic": self.subtopic,
             "difficulty": self.difficulty,
@@ -188,15 +188,11 @@ def create_paper():
     school = request.form.get("school")
     subject = request.form.get("subject")
     year_level = request.form.get("year_level")
-    unit = request.form.get("unit")
     exam_type = request.form.get("exam_type")
     exam_year = request.form.get("exam_year")
 
-    if not all([school, subject, year_level, unit, exam_type]):
-        return jsonify({"error": "school, subject, year_level, unit, exam_type are required"}), 400
-
-    if unit not in {"1", "2", "3", "4"}:
-        return jsonify({"error": "unit must be 1, 2, 3, or 4"}), 400
+    if not all([school, subject, year_level, exam_type]):
+        return jsonify({"error": "school, subject, year_level, exam_type are required"}), 400
 
     if "file" not in request.files or request.files["file"].filename == "":
         return jsonify({"error": "original paper file is required"}), 400
@@ -217,7 +213,6 @@ def create_paper():
         school=school,
         subject=subject,
         year_level=int(year_level),
-        unit=int(unit),
         exam_type=exam_type,
         exam_year=int(exam_year) if exam_year else None,
         file_path=file_path,
@@ -231,9 +226,10 @@ def create_paper():
 @app.route("/api/papers/<int:paper_id>", methods=["PATCH"])
 def update_paper(paper_id):
     """Partial update for a paper's metadata (school, subject, year_level,
-    unit, exam_type, exam_year) -- for backfilling fields like "unit" on
-    a paper you added before that field existed, without re-uploading
-    the file or touching any questions already chopped from it."""
+    exam_type, exam_year) -- e.g. for correcting a typo without
+    re-uploading the file or touching any questions already chopped
+    from it. Unit lives on the QUESTION, not the paper -- see
+    PATCH /api/questions/<id> for that."""
     paper = Paper.query.get_or_404(paper_id)
     data = request.get_json() or {}
 
@@ -243,13 +239,6 @@ def update_paper(paper_id):
         paper.subject = data["subject"]
     if "year_level" in data and data["year_level"]:
         paper.year_level = int(data["year_level"])
-    if "unit" in data:
-        if data["unit"] in (None, ""):
-            paper.unit = None
-        elif str(data["unit"]) in {"1", "2", "3", "4"}:
-            paper.unit = int(data["unit"])
-        else:
-            return jsonify({"error": "unit must be 1, 2, 3, or 4"}), 400
     if "exam_type" in data and data["exam_type"]:
         paper.exam_type = data["exam_type"]
     if "exam_year" in data:
@@ -294,7 +283,7 @@ def list_questions():
     if school:
         query = query.filter(Paper.school == school)
     if unit:
-        query = query.filter(Paper.unit == int(unit))
+        query = query.filter(Question.unit == int(unit))
     if topic:
         query = query.filter(Question.topic == topic)
     if subtopic:
@@ -324,6 +313,7 @@ def create_question():
     {
       "paper_id": 1,
       "question_number": "4b",
+      "unit": 3,
       "topic": "Calculus",
       "subtopic": "Related rates",
       "difficulty": "CU",
@@ -344,9 +334,14 @@ def create_question():
     if data["difficulty"].upper() not in {"SF", "CF", "CU"}:
         return jsonify({"error": "difficulty must be SF, CF, or CU"}), 400
 
+    unit = data.get("unit")
+    if unit is not None and int(unit) not in {1, 2, 3, 4}:
+        return jsonify({"error": "unit must be 1, 2, 3, or 4"}), 400
+
     question = Question(
         paper_id=paper.id,
         question_number=data.get("question_number"),
+        unit=int(unit) if unit is not None else None,
         topic=data["topic"],
         subtopic=data.get("subtopic"),
         difficulty=data["difficulty"].upper(),
@@ -392,6 +387,12 @@ def update_question(question_id):
         if data["difficulty"].upper() not in {"SF", "CF", "CU"}:
             return jsonify({"error": "difficulty must be SF, CF, or CU"}), 400
         question.difficulty = data["difficulty"].upper()
+
+    if "unit" in data:
+        unit = data["unit"]
+        if unit is not None and int(unit) not in {1, 2, 3, 4}:
+            return jsonify({"error": "unit must be 1, 2, 3, or 4"}), 400
+        question.unit = int(unit) if unit is not None else None
 
     if "tags" in data:
         question.tags = []
@@ -520,7 +521,7 @@ def list_topics():
     if subject:
         query = query.filter(Paper.subject == subject)
     if unit:
-        query = query.filter(Paper.unit == int(unit))
+        query = query.filter(Question.unit == int(unit))
     return jsonify(sorted([t[0] for t in query.all()]))
 
 
@@ -536,7 +537,7 @@ def list_subtopics():
     if subject:
         query = query.filter(Paper.subject == subject)
     if unit:
-        query = query.filter(Paper.unit == int(unit))
+        query = query.filter(Question.unit == int(unit))
     if topic:
         query = query.filter(Question.topic == topic)
     return jsonify(sorted([s[0] for s in query.all()]))
@@ -575,12 +576,17 @@ if __name__ == "__main__":
                 conn.execute(db.text("ALTER TABLE questions ADD COLUMN answer_file_path VARCHAR(300)"))
             existing_cols.add("answer_file_path")
 
-        existing_paper_cols = {c["name"] for c in inspector.get_columns("papers")}
-        if "unit" not in existing_paper_cols:
+        if "unit" not in existing_cols:
             with db.engine.begin() as conn:
-                conn.execute(db.text("ALTER TABLE papers ADD COLUMN unit INTEGER"))
-            # existing papers from before "unit" existed are left NULL --
-            # they'll just show "no unit" in the UI until you edit them.
+                conn.execute(db.text("ALTER TABLE questions ADD COLUMN unit INTEGER"))
+            existing_cols.add("unit")
+            # Existing questions (e.g. from before this field existed, or
+            # chopped under the old paper-level "unit" that's since been
+            # removed) are left with unit=NULL -- there's no reliable way
+            # to infer it automatically, especially with old-vs-new
+            # syllabus content having moved between units. Use "Edit" on
+            # a question in the full-screen viewer to set it retroactively,
+            # question by question, without re-uploading anything.
 
         # Multi-page support: question/answer images now live in their own
         # question_images table (one question can have several page crops)

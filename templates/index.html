@@ -69,16 +69,6 @@
         </select>
       </label>
 
-      <label>Unit
-        <select id="p-unit" required>
-          <option value="">Choose a unit</option>
-          <option value="1">Unit 1</option>
-          <option value="2">Unit 2</option>
-          <option value="3">Unit 3</option>
-          <option value="4">Unit 4</option>
-        </select>
-      </label>
-
       <label>Exam type
         <select id="p-exam-type" required>
           <option value="internal">Internal</option>
@@ -154,6 +144,16 @@
             <input type="text" id="q-number" placeholder="e.g. 4b">
           </label>
 
+          <label>Unit
+            <select id="q-unit" required>
+              <option value="">Choose a unit</option>
+              <option value="1">Unit 1</option>
+              <option value="2">Unit 2</option>
+              <option value="3">Unit 3</option>
+              <option value="4">Unit 4</option>
+            </select>
+          </label>
+
           <label>Topic
             <input list="topic-list" id="q-topic" required>
             <datalist id="topic-list"></datalist>
@@ -213,6 +213,7 @@
       <span id="modal-meta"></span>
     </div>
     <button id="modal-delete" class="secondary">Delete</button>
+    <button id="modal-edit" class="secondary">Edit</button>
   </div>
   <button id="modal-prev" class="modal-nav-arrow modal-nav-prev" aria-label="Previous question">&lsaquo;</button>
   <button id="modal-next" class="modal-nav-arrow modal-nav-next" aria-label="Next question">&rsaquo;</button>
