@@ -39,7 +39,8 @@
         <option value="mock">Mock</option>
         <option value="QCAA">QCAA-style</option>
       </select>
-      <input id="f-tags" type="text" placeholder="tags (comma separated)">
+      <input id="f-tags" type="text" placeholder="include tags (comma separated)">
+      <input id="f-tags-exclude" type="text" placeholder="exclude tags (comma separated)">
       <button id="apply-filters">Filter</button>
       <button id="clear-filters" class="secondary">Clear</button>
     </div>
@@ -115,7 +116,9 @@
         </div>
         <div class="zoom-controls">
           <button id="zoom-out" aria-label="Zoom out">&minus;</button>
-          <span id="zoom-indicator">100%</span>
+          <span class="zoom-input-wrap">
+            <input type="number" id="zoom-input" min="30" max="400" step="5" value="100" aria-label="Zoom percentage">%
+          </span>
           <button id="zoom-in" aria-label="Zoom in">+</button>
           <button id="zoom-fit" class="secondary">Fit</button>
         </div>

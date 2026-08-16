@@ -436,7 +436,7 @@ async function populateAnswerQuestionSelect() {
   }
   select.innerHTML = questions.map(q => `
     <option value="${q.id}">
-      ${q.question_number ? "Q" + escapeHtml(q.question_number) + " — " : ""}${escapeHtml(q.topic)} (${q.difficulty})${q.has_answer ? " [already has an answer]" : ""}
+      ${q.question_number ? escapeHtml(q.question_number) + " — " : ""}${escapeHtml(q.topic)} (${q.difficulty})${q.has_answer ? " [already has an answer]" : ""}
     </option>
   `).join("");
 }
@@ -480,7 +480,7 @@ async function renderPage(num) {
   await page.render(renderContext).promise;
 
   document.getElementById("page-indicator").textContent = `Page ${num} / ${pdfDoc.numPages}`;
-  document.getElementById("zoom-indicator").textContent = `${Math.round(scale * 100)}%`;
+  document.getElementById("zoom-input").value = Math.round(scale * 100);
   clearOverlay();
 }
 
@@ -512,6 +512,31 @@ document.getElementById("zoom-fit").addEventListener("click", async () => {
   await fitToWidth();
   await renderPage(currentPage);
 });
+
+// Type a specific zoom % directly, as an alternative to the +/-/Fit
+// buttons. Applies on Enter or when you click away from the field.
+function applyTypedZoom() {
+  if (!pdfDoc) return;
+  const input = document.getElementById("zoom-input");
+  const minPct = MIN_SCALE * 100;
+  const maxPct = MAX_SCALE * 100;
+  let val = parseFloat(input.value);
+  if (isNaN(val)) {
+    input.value = Math.round(scale * 100); // reject garbage input, restore current value
+    return;
+  }
+  val = Math.max(minPct, Math.min(maxPct, val));
+  scale = val / 100;
+  renderPage(currentPage);
+}
+document.getElementById("zoom-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    applyTypedZoom();
+    document.getElementById("zoom-input").blur();
+  }
+});
+document.getElementById("zoom-input").addEventListener("blur", applyTypedZoom);
 
 // Note: we deliberately do NOT auto-refit on window "resize". iOS Safari
 // fires resize events constantly during ordinary scrolling (its address
@@ -834,6 +859,7 @@ document.getElementById("apply-filters").addEventListener("click", refreshBrowse
 document.getElementById("clear-filters").addEventListener("click", () => {
   ["f-subject", "f-school", "f-difficulty", "f-exam-type"].forEach(id => document.getElementById(id).value = "");
   document.getElementById("f-tags").value = "";
+  document.getElementById("f-tags-exclude").value = "";
   resetUnitDown(); // also clears/disables topic + subtopic beneath it
   refreshBrowse();
 });
@@ -850,6 +876,7 @@ async function refreshBrowse() {
   const difficulty = document.getElementById("f-difficulty").value;
   const examType = document.getElementById("f-exam-type").value;
   const tagsRaw = document.getElementById("f-tags").value;
+  const excludeTagsRaw = document.getElementById("f-tags-exclude").value;
 
   if (subject) params.append("subject", subject);
   if (school) params.append("school", school);
@@ -859,6 +886,7 @@ async function refreshBrowse() {
   if (difficulty) params.append("difficulty", difficulty);
   if (examType) params.append("exam_type", examType);
   if (tagsRaw) tagsRaw.split(",").map(t => t.trim()).filter(Boolean).forEach(t => params.append("tag", t));
+  if (excludeTagsRaw) excludeTagsRaw.split(",").map(t => t.trim()).filter(Boolean).forEach(t => params.append("exclude_tag", t));
 
   const questions = await fetchJSON("/api/questions?" + params.toString());
   browseResultsCache = questions;
@@ -896,7 +924,7 @@ function renderQuestionCard(q) {
       <div>${q.tags.map(t => `<span class="tag-pill">${escapeHtml(t)}</span>`).join("")}</div>
       <div class="card-actions">
         <button class="secondary" onclick="openQuestionModal(${q.id})">Details</button>
-        <button class="secondary" onclick="deleteQuestion(${q.id})">delete</button>
+        <button class="secondary" onclick="deleteQuestion(${q.id})">Delete</button>
       </div>
     </div>
   `;

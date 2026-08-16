@@ -26,6 +26,23 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+def normalize_question_number(raw):
+    """Keeps a leading "Q" if one's already there (case-normalized to
+    uppercase), otherwise adds one -- so "Q1", "q1", and "1" all end up
+    stored as "Q1" regardless of which way it was typed. Without this,
+    some questions end up stored with a "Q" and some without, and any
+    display code that adds its own "Q" prefix for the ones without ends
+    up double-prefixing the ones that already have it (e.g. "QQ1")."""
+    if raw is None:
+        return None
+    trimmed = raw.strip()
+    if not trimmed:
+        return None
+    if trimmed[0].lower() == "q":
+        return "Q" + trimmed[1:]
+    return "Q" + trimmed
+
+
 def save_upload(file_storage, subfolder=""):
     """Saves an uploaded file with a unique name, returns the relative path stored in DB."""
     original_name = secure_filename(file_storage.filename)
@@ -263,7 +280,9 @@ def list_questions():
     """
     Filterable via query params, e.g.:
     /api/questions?subject=Methods&topic=Calculus&difficulty=CU&school=SchoolX&tag=appeared_on_mock
-    Multiple tag params are AND'd together (must have all listed tags).
+    Multiple "tag" params are AND'd together (must have all listed tags).
+    Multiple "exclude_tag" params are OR'd -- a question with ANY of the
+    excluded tags is dropped, regardless of whether it also matches "tag".
     """
     query = Question.query.join(Paper)
 
@@ -277,6 +296,7 @@ def list_questions():
     year_level = request.args.get("year_level")
     paper_id = request.args.get("paper_id")
     tags = request.args.getlist("tag")
+    exclude_tags = request.args.getlist("exclude_tag")
 
     if subject:
         query = query.filter(Paper.subject == subject)
@@ -302,6 +322,10 @@ def list_questions():
     if tags:
         tag_set = set(tags)
         results = [q for q in results if tag_set.issubset({t.name for t in q.tags})]
+
+    if exclude_tags:
+        exclude_set = set(exclude_tags)
+        results = [q for q in results if not exclude_set.intersection({t.name for t in q.tags})]
 
     return jsonify([q.to_dict() for q in results])
 
@@ -340,7 +364,7 @@ def create_question():
 
     question = Question(
         paper_id=paper.id,
-        question_number=data.get("question_number"),
+        question_number=normalize_question_number(data.get("question_number")),
         unit=int(unit) if unit is not None else None,
         topic=data["topic"],
         subtopic=data.get("subtopic"),
@@ -379,9 +403,12 @@ def update_question(question_id):
     question = Question.query.get_or_404(question_id)
     data = request.get_json() or {}
 
-    for field in ["question_number", "topic", "subtopic", "notes", "page_number"]:
+    for field in ["topic", "subtopic", "notes", "page_number"]:
         if field in data:
             setattr(question, field, data[field])
+
+    if "question_number" in data:
+        question.question_number = normalize_question_number(data["question_number"])
 
     if "difficulty" in data:
         if data["difficulty"].upper() not in {"SF", "CF", "CU"}:
@@ -621,4 +648,21 @@ if __name__ == "__main__":
                                 "INSERT INTO question_images (question_id, kind, file_path, order_index, date_added) "
                                 "VALUES (:qid, 'answer', :fp, 0, :now)"
                             ), {"qid": qid, "fp": answer_path, "now": datetime.utcnow()})
+
+        # Normalize any existing question_number values to always include a
+        # leading "Q", matching what new saves now produce. Some earlier
+        # chopping already typed "Q1" manually, some just typed "1" -- left
+        # inconsistent, any display code adding its own "Q" would double up
+        # on the ones that already had one (showing "QQ1"). This is a plain
+        # data normalization (not a schema change), safe to re-run every
+        # startup since it's a no-op once everything's already normalized.
+        to_fix = Question.query.filter(Question.question_number.isnot(None)).all()
+        changed = False
+        for q in to_fix:
+            normalized = normalize_question_number(q.question_number)
+            if normalized != q.question_number:
+                q.question_number = normalized
+                changed = True
+        if changed:
+            db.session.commit()
     app.run(host="0.0.0.0", port=5000, debug=True)

@@ -377,12 +377,29 @@ button.small {
   font-size: 12px;
 }
 
-#zoom-indicator {
-  min-width: 44px;
-  text-align: center;
+.zoom-input-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
   font-size: 13px;
   color: var(--muted);
 }
+
+#zoom-input {
+  width: 48px;
+  text-align: right;
+  padding: 4px 4px;
+  font-size: 13px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+}
+/* hide the spinner arrows -- they add width without adding much value
+   for a field you'll mostly type into directly */
+#zoom-input::-webkit-outer-spin-button,
+#zoom-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+#zoom-input { -moz-appearance: textfield; }
 
 .chop-main {
   display: flex;
