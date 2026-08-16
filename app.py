@@ -228,6 +228,37 @@ def create_paper():
     return jsonify(paper.to_dict()), 201
 
 
+@app.route("/api/papers/<int:paper_id>", methods=["PATCH"])
+def update_paper(paper_id):
+    """Partial update for a paper's metadata (school, subject, year_level,
+    unit, exam_type, exam_year) -- for backfilling fields like "unit" on
+    a paper you added before that field existed, without re-uploading
+    the file or touching any questions already chopped from it."""
+    paper = Paper.query.get_or_404(paper_id)
+    data = request.get_json() or {}
+
+    if "school" in data and data["school"]:
+        paper.school = data["school"]
+    if "subject" in data and data["subject"]:
+        paper.subject = data["subject"]
+    if "year_level" in data and data["year_level"]:
+        paper.year_level = int(data["year_level"])
+    if "unit" in data:
+        if data["unit"] in (None, ""):
+            paper.unit = None
+        elif str(data["unit"]) in {"1", "2", "3", "4"}:
+            paper.unit = int(data["unit"])
+        else:
+            return jsonify({"error": "unit must be 1, 2, 3, or 4"}), 400
+    if "exam_type" in data and data["exam_type"]:
+        paper.exam_type = data["exam_type"]
+    if "exam_year" in data:
+        paper.exam_year = int(data["exam_year"]) if data["exam_year"] else None
+
+    db.session.commit()
+    return jsonify(paper.to_dict())
+
+
 @app.route("/api/papers/<int:paper_id>", methods=["DELETE"])
 def delete_paper(paper_id):
     paper = Paper.query.get_or_404(paper_id)

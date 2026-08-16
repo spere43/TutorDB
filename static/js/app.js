@@ -171,22 +171,111 @@ document.getElementById("add-paper-form").addEventListener("submit", async (e) =
   }
 });
 
+let papersListCache = [];
+
 async function refreshPapersList() {
   const papers = await fetchJSON("/api/papers");
+  papersListCache = papers;
   const el = document.getElementById("papers-list");
   if (papers.length === 0) {
     el.innerHTML = `<p class="muted">No papers added yet.</p>`;
     return;
   }
   el.innerHTML = papers.map(p => `
-    <div class="paper-row">
-      <div class="paper-info">
-        <b>${escapeHtml(p.school)}</b> — ${escapeHtml(p.subject)} (Y${p.year_level}${p.unit ? ", Unit " + p.unit : ""}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""})
-        <br><span><a href="/files/${p.file_path}" target="_blank">view original</a>${p.solution_file_path ? ` | <a href="/files/${p.solution_file_path}" target="_blank">view solutions</a>` : ""}</span>
+    <div class="paper-row-wrap">
+      <div class="paper-row">
+        <div class="paper-info">
+          <b>${escapeHtml(p.school)}</b> — ${escapeHtml(p.subject)} (Y${p.year_level}${p.unit ? ", Unit " + p.unit : ""}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""})
+          ${!p.unit ? `<span class="no-unit-flag">no unit set</span>` : ""}
+          <br><span><a href="/files/${p.file_path}" target="_blank">view original</a>${p.solution_file_path ? ` | <a href="/files/${p.solution_file_path}" target="_blank">view solutions</a>` : ""}</span>
+        </div>
+        <div class="paper-row-actions">
+          <button class="secondary" onclick="togglePaperEdit(${p.id})" id="paper-edit-btn-${p.id}">Edit</button>
+          <button class="secondary" onclick="deletePaper(${p.id})">Delete</button>
+        </div>
       </div>
-      <button class="secondary" onclick="deletePaper(${p.id})">Delete</button>
+      <div class="paper-edit-form" id="paper-edit-${p.id}" style="display:none;"></div>
     </div>
   `).join("");
+}
+
+// Lets you fix/backfill a paper's metadata -- e.g. set "unit" on a paper
+// added before that field existed -- without touching the uploaded file
+// or any questions already chopped from it.
+function togglePaperEdit(id) {
+  const panel = document.getElementById(`paper-edit-${id}`);
+  const isOpen = panel.style.display !== "none";
+  if (isOpen) {
+    panel.style.display = "none";
+    panel.innerHTML = "";
+    return;
+  }
+  const p = papersListCache.find(x => x.id === id);
+  if (!p) return;
+  panel.style.display = "block";
+  panel.innerHTML = `
+    <label>School
+      <input type="text" id="edit-school-${id}" list="school-list" value="${escapeHtml(p.school)}">
+    </label>
+    <label>Subject
+      <input type="text" id="edit-subject-${id}" list="subject-list" value="${escapeHtml(p.subject)}">
+    </label>
+    <label>Year level
+      <select id="edit-year-${id}">
+        <option value="11" ${p.year_level === 11 ? "selected" : ""}>11</option>
+        <option value="12" ${p.year_level === 12 ? "selected" : ""}>12</option>
+      </select>
+    </label>
+    <label>Unit
+      <select id="edit-unit-${id}">
+        <option value="" ${!p.unit ? "selected" : ""}>No unit set</option>
+        <option value="1" ${p.unit === 1 ? "selected" : ""}>Unit 1</option>
+        <option value="2" ${p.unit === 2 ? "selected" : ""}>Unit 2</option>
+        <option value="3" ${p.unit === 3 ? "selected" : ""}>Unit 3</option>
+        <option value="4" ${p.unit === 4 ? "selected" : ""}>Unit 4</option>
+      </select>
+    </label>
+    <label>Exam type
+      <select id="edit-examtype-${id}">
+        <option value="internal" ${p.exam_type === "internal" ? "selected" : ""}>Internal</option>
+        <option value="mock" ${p.exam_type === "mock" ? "selected" : ""}>Mock</option>
+        <option value="QCAA" ${p.exam_type === "QCAA" ? "selected" : ""}>QCAA-style</option>
+      </select>
+    </label>
+    <label>Exam year (optional)
+      <input type="number" id="edit-examyear-${id}" value="${p.exam_year || ""}" min="2000" max="2100">
+    </label>
+    <div class="paper-edit-actions">
+      <button type="button" onclick="savePaperEdit(${id})">Save</button>
+      <button type="button" class="secondary" onclick="togglePaperEdit(${id})">Cancel</button>
+    </div>
+    <div class="status-msg" id="paper-edit-status-${id}"></div>
+  `;
+}
+
+async function savePaperEdit(id) {
+  const statusEl = document.getElementById(`paper-edit-status-${id}`);
+  statusEl.textContent = "Saving...";
+  statusEl.className = "status-msg";
+  try {
+    await fetchJSON(`/api/papers/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        school: document.getElementById(`edit-school-${id}`).value.trim(),
+        subject: document.getElementById(`edit-subject-${id}`).value.trim(),
+        year_level: document.getElementById(`edit-year-${id}`).value,
+        unit: document.getElementById(`edit-unit-${id}`).value || null,
+        exam_type: document.getElementById(`edit-examtype-${id}`).value,
+        exam_year: document.getElementById(`edit-examyear-${id}`).value || null,
+      }),
+    });
+    await refreshPapersList();
+    loadDropdownData();
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+    statusEl.className = "status-msg err";
+  }
 }
 
 async function deletePaper(id) {
@@ -983,6 +1072,8 @@ document.addEventListener("keydown", (e) => {
 // Init
 // ---------------------------------------------------------------
 window.deletePaper = deletePaper;
+window.togglePaperEdit = togglePaperEdit;
+window.savePaperEdit = savePaperEdit;
 window.openChopById = openChopById;
 window.deleteQuestion = deleteQuestion;
 window.openQuestionModal = openQuestionModal;
