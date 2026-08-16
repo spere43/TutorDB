@@ -126,6 +126,7 @@ async function refreshChopPicker() {
   document.getElementById("chop-workspace").style.display = "none";
   document.getElementById("chop-picker").style.display = "block";
   const papers = await fetchJSON("/api/papers");
+  papersCache = papers;
   const el = document.getElementById("chop-papers-list");
   if (papers.length === 0) {
     el.innerHTML = `<p class="muted">No papers yet — add one in the Add Paper tab first.</p>`;
@@ -135,19 +136,32 @@ async function refreshChopPicker() {
     <div class="paper-row">
       <div class="paper-info">
         <b>${escapeHtml(p.school)}</b> — ${escapeHtml(p.subject)} (Y${p.year_level}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""})
+        ${p.solution_file_path ? `<br><span class="muted">Has a solutions file</span>` : ""}
       </div>
-      <button onclick="openChop(${p.id}, '${escapeHtml(p.file_path)}', '${escapeHtml(p.school)} — ${escapeHtml(p.subject)}')">Chop this paper</button>
+      <button onclick="openChopById(${p.id})">Chop this paper</button>
     </div>
   `).join("");
 }
 
 document.getElementById("chop-back").addEventListener("click", refreshChopPicker);
 
+let papersCache = [];
 let pdfDoc = null;
 let currentPage = 1;
 let currentPaperId = null;
+let currentPaper = null;
 let selectedDifficulty = null;
 let pendingCropBlob = null;
+let pendingCropPage = null;
+let chopMode = "questions"; // "questions" | "answers"
+
+// A question (or its answer) can span multiple pages/regions. Each drawn
+// box is staged here -- {blob, page} -- until "Save question"/"Save
+// answer" uploads them all in order. This is what makes multi-page
+// questions just "draw several boxes before saving" instead of a
+// separate flow.
+let stagedQuestionParts = [];
+let stagedAnswerParts = [];
 
 // `scale` is an ABSOLUTE PDF.js scale: 1.0 always means "1 PDF point = 1 CSS
 // pixel" (the PDF's real, native size), the same on every device. That's
@@ -160,18 +174,75 @@ const MIN_SCALE = 0.3;
 const MAX_SCALE = 4;
 const ZOOM_STEP_FACTOR = 1.15;
 
-async function openChop(paperId, filePath, title) {
-  currentPaperId = paperId;
+async function openChopById(paperId) {
+  const paper = papersCache.find(p => p.id === paperId);
+  if (!paper) return;
+  await openChop(paper);
+}
+
+async function openChop(paper) {
+  currentPaper = paper;
+  currentPaperId = paper.id;
+  chopMode = "questions";
+
   document.getElementById("chop-picker").style.display = "none";
   document.getElementById("chop-workspace").style.display = "block";
-  document.getElementById("chop-paper-title").textContent = title;
+  document.getElementById("chop-paper-title").textContent = `${paper.school} — ${paper.subject}`;
 
-  const loadingTask = pdfjsLib.getDocument(`/files/${filePath}`);
+  const modeSwitch = document.getElementById("chop-mode-switch");
+  document.querySelectorAll(".mode-btn").forEach(b => b.classList.remove("active"));
+  document.querySelector('.mode-btn[data-mode="questions"]').classList.add("active");
+  modeSwitch.style.display = paper.solution_file_path ? "flex" : "none";
+  showChopFormForMode();
+
+  await loadPdfForMode();
+  resetQuestionForm();
+  resetAnswerForm();
+}
+
+// Loads either the paper's original file or its solutions file into
+// pdf.js, depending on which mode we're chopping in.
+async function loadPdfForMode() {
+  const path = chopMode === "answers" ? currentPaper.solution_file_path : currentPaper.file_path;
+  const loadingTask = pdfjsLib.getDocument(`/files/${path}`);
   pdfDoc = await loadingTask.promise;
   currentPage = 1;
   await fitToWidth();
   await renderPage(currentPage);
-  resetQuestionForm();
+}
+
+function showChopFormForMode() {
+  document.getElementById("chop-form-questions").style.display = chopMode === "questions" ? "block" : "none";
+  document.getElementById("chop-form-answers").style.display = chopMode === "answers" ? "block" : "none";
+}
+
+document.querySelectorAll(".mode-btn").forEach(btn => {
+  btn.addEventListener("click", async () => {
+    if (!currentPaper) return;
+    chopMode = btn.dataset.mode;
+    document.querySelectorAll(".mode-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    showChopFormForMode();
+    clearOverlay();
+    resetQuestionForm();
+    resetAnswerForm();
+    if (chopMode === "answers") await populateAnswerQuestionSelect();
+    await loadPdfForMode();
+  });
+});
+
+async function populateAnswerQuestionSelect() {
+  const select = document.getElementById("answer-q-select");
+  const questions = await fetchJSON(`/api/questions?paper_id=${currentPaper.id}`);
+  if (questions.length === 0) {
+    select.innerHTML = `<option value="">No questions chopped yet for this paper</option>`;
+    return;
+  }
+  select.innerHTML = questions.map(q => `
+    <option value="${q.id}">
+      ${q.question_number ? "Q" + escapeHtml(q.question_number) + " — " : ""}${escapeHtml(q.topic)} (${q.difficulty})${q.has_answer ? " [already has an answer]" : ""}
+    </option>
+  `).join("");
 }
 
 // Sets `scale` to whatever absolute value makes the page fill the
@@ -341,12 +412,70 @@ function cropSelection(x, y, w, h) {
 
   cropCanvas.toBlob(blob => {
     pendingCropBlob = blob;
+    pendingCropPage = currentPage;
     const previewUrl = URL.createObjectURL(blob);
-    document.getElementById("crop-preview").src = previewUrl;
-    document.getElementById("crop-preview-wrap").style.display = "block";
-    document.getElementById("save-question").disabled = false;
+    if (chopMode === "answers") {
+      document.getElementById("answer-crop-preview").src = previewUrl;
+      document.getElementById("answer-crop-preview-wrap").style.display = "block";
+      document.getElementById("save-answer").disabled = false;
+      document.getElementById("add-answer-part").disabled = false;
+    } else {
+      document.getElementById("crop-preview").src = previewUrl;
+      document.getElementById("crop-preview-wrap").style.display = "block";
+      document.getElementById("save-question").disabled = false;
+      document.getElementById("add-question-part").disabled = false;
+    }
   }, "image/png");
 }
+
+// ---- Multi-page staging (question side) ----
+function renderStagedParts(listElId, staged) {
+  const el = document.getElementById(listElId);
+  if (staged.length === 0) {
+    el.innerHTML = "";
+    el.style.display = "none";
+    return;
+  }
+  el.style.display = "flex";
+  el.innerHTML = staged.map((part, i) => `
+    <div class="staged-part">
+      <img src="${URL.createObjectURL(part.blob)}" alt="part ${i + 1}">
+      <span class="staged-part-page">p${part.page}</span>
+      <button type="button" class="staged-part-remove" onclick="removeStagedPart('${listElId}', ${i})">&times;</button>
+    </div>
+  `).join("");
+}
+
+function removeStagedPart(listElId, index) {
+  const staged = listElId === "question-staged-parts" ? stagedQuestionParts : stagedAnswerParts;
+  staged.splice(index, 1);
+  renderStagedParts(listElId, staged);
+}
+window.removeStagedPart = removeStagedPart;
+
+document.getElementById("add-question-part").addEventListener("click", () => {
+  if (!pendingCropBlob) return;
+  stagedQuestionParts.push({ blob: pendingCropBlob, page: pendingCropPage });
+  renderStagedParts("question-staged-parts", stagedQuestionParts);
+  pendingCropBlob = null;
+  pendingCropPage = null;
+  document.getElementById("crop-preview-wrap").style.display = "none";
+  document.getElementById("save-question").disabled = stagedQuestionParts.length === 0;
+  document.getElementById("add-question-part").disabled = true;
+  clearOverlay();
+});
+
+document.getElementById("add-answer-part").addEventListener("click", () => {
+  if (!pendingCropBlob) return;
+  stagedAnswerParts.push({ blob: pendingCropBlob, page: pendingCropPage });
+  renderStagedParts("answer-staged-parts", stagedAnswerParts);
+  pendingCropBlob = null;
+  pendingCropPage = null;
+  document.getElementById("answer-crop-preview-wrap").style.display = "none";
+  document.getElementById("save-answer").disabled = stagedAnswerParts.length === 0;
+  document.getElementById("add-answer-part").disabled = true;
+  clearOverlay();
+});
 
 // ---- Difficulty buttons ----
 document.querySelectorAll(".diff-btn").forEach(btn => {
@@ -366,14 +495,44 @@ function resetQuestionForm() {
   document.querySelectorAll(".diff-btn").forEach(b => b.classList.remove("selected"));
   selectedDifficulty = null;
   pendingCropBlob = null;
+  pendingCropPage = null;
+  stagedQuestionParts = [];
+  renderStagedParts("question-staged-parts", stagedQuestionParts);
   document.getElementById("crop-preview-wrap").style.display = "none";
   document.getElementById("save-question").disabled = true;
+  document.getElementById("add-question-part").disabled = true;
   document.getElementById("chop-status").textContent = "";
+}
+
+function resetAnswerForm() {
+  pendingCropBlob = null;
+  pendingCropPage = null;
+  stagedAnswerParts = [];
+  renderStagedParts("answer-staged-parts", stagedAnswerParts);
+  document.getElementById("answer-crop-preview-wrap").style.display = "none";
+  document.getElementById("save-answer").disabled = true;
+  document.getElementById("add-answer-part").disabled = true;
+  document.getElementById("answer-chop-status").textContent = "";
+}
+
+// Uploads each staged/pending part for a freshly-created question or an
+// existing one, in order, so a multi-page question ends up with its
+// parts in the order they were drawn.
+async function uploadParts(questionId, endpoint, fileField, parts) {
+  for (const part of parts) {
+    const form = new FormData();
+    form.append(fileField, part.blob, "part.png");
+    if (part.page != null) form.append("page_number", part.page);
+    await fetchJSON(`/api/questions/${questionId}${endpoint}`, { method: "POST", body: form });
+  }
 }
 
 document.getElementById("save-question").addEventListener("click", async () => {
   const statusEl = document.getElementById("chop-status");
   const topic = document.getElementById("q-topic").value.trim();
+
+  const parts = [...stagedQuestionParts];
+  if (pendingCropBlob) parts.push({ blob: pendingCropBlob, page: pendingCropPage });
 
   if (!topic) {
     statusEl.textContent = "Topic is required.";
@@ -385,8 +544,8 @@ document.getElementById("save-question").addEventListener("click", async () => {
     statusEl.className = "status-msg err";
     return;
   }
-  if (!pendingCropBlob) {
-    statusEl.textContent = "Draw a box around the question first.";
+  if (parts.length === 0) {
+    statusEl.textContent = "Draw a box around the question first (draw more than one if it spans several pages).";
     statusEl.className = "status-msg err";
     return;
   }
@@ -407,21 +566,58 @@ document.getElementById("save-question").addEventListener("click", async () => {
         topic,
         subtopic: document.getElementById("q-subtopic").value.trim() || null,
         difficulty: selectedDifficulty,
-        page_number: currentPage,
+        page_number: parts[0].page,
         notes: document.getElementById("q-notes").value.trim() || null,
         tags,
       }),
     });
 
-    const cropForm = new FormData();
-    cropForm.append("image", pendingCropBlob, "crop.png");
-    await fetchJSON(`/api/questions/${question.id}/crop`, { method: "POST", body: cropForm });
+    await uploadParts(question.id, "/crop", "image", parts);
 
-    statusEl.textContent = "Question saved. Draw the next one.";
+    statusEl.textContent = parts.length > 1
+      ? `Question saved with ${parts.length} pages. Draw the next one.`
+      : "Question saved. Draw the next one.";
     statusEl.className = "status-msg ok";
     clearOverlay();
     resetQuestionForm();
     loadDropdownData();
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+    statusEl.className = "status-msg err";
+  }
+});
+
+document.getElementById("save-answer").addEventListener("click", async () => {
+  const statusEl = document.getElementById("answer-chop-status");
+  const questionId = document.getElementById("answer-q-select").value;
+
+  const parts = [...stagedAnswerParts];
+  if (pendingCropBlob) parts.push({ blob: pendingCropBlob, page: pendingCropPage });
+
+  if (!questionId) {
+    statusEl.textContent = "Pick which question this answers.";
+    statusEl.className = "status-msg err";
+    return;
+  }
+  if (parts.length === 0) {
+    statusEl.textContent = "Draw a box around the worked solution first (draw more than one if it spans several pages).";
+    statusEl.className = "status-msg err";
+    return;
+  }
+
+  statusEl.textContent = "Saving...";
+  statusEl.className = "status-msg";
+
+  try {
+    await uploadParts(questionId, "/answer", "file", parts);
+
+    statusEl.textContent = parts.length > 1
+      ? `Answer linked with ${parts.length} pages. Draw the next one.`
+      : "Answer linked. Draw the next one.";
+    statusEl.className = "status-msg ok";
+    clearOverlay();
+    resetAnswerForm();
+    await populateAnswerQuestionSelect(); // refresh the "[already has an answer]" labels
   } catch (err) {
     statusEl.textContent = "Error: " + err.message;
     statusEl.className = "status-msg err";
@@ -457,6 +653,7 @@ async function refreshBrowse() {
   if (tagsRaw) tagsRaw.split(",").map(t => t.trim()).filter(Boolean).forEach(t => params.append("tag", t));
 
   const questions = await fetchJSON("/api/questions?" + params.toString());
+  browseResultsCache = questions;
   document.getElementById("results-count").textContent = `${questions.length} question(s)`;
 
   const grid = document.getElementById("results-grid");
@@ -465,12 +662,24 @@ async function refreshBrowse() {
     return;
   }
 
-  grid.innerHTML = questions.map(q => `
-    <div class="q-card">
-      ${q.crop_image_path
-        ? `<img src="/files/${q.crop_image_path}" alt="Question ${q.question_number || ""}">`
+  grid.innerHTML = questions.map(renderQuestionCard).join("");
+}
+
+let browseResultsCache = [];
+
+function findCachedQuestion(id) {
+  return browseResultsCache.find(q => q.id === id);
+}
+
+function renderQuestionCard(q) {
+  const thumb = q.question_images[0];
+  return `
+    <div class="q-card" id="q-card-${q.id}">
+      ${thumb
+        ? `<img src="/files/${thumb.file_path}" alt="Question ${q.question_number || ""}">`
         : `<div class="muted">No crop image (page ${q.page_number || "?"})</div>`
       }
+      ${q.question_images.length > 1 ? `<div class="page-count-badge">${q.question_images.length} pages</div>` : ""}
       <div class="meta-row">
         <span>${escapeHtml(q.school)} · ${escapeHtml(q.subject)}</span>
         <span class="diff-tag ${q.difficulty}">${q.difficulty}</span>
@@ -478,11 +687,125 @@ async function refreshBrowse() {
       <div class="muted">${escapeHtml(q.topic)}${q.subtopic ? " · " + escapeHtml(q.subtopic) : ""}</div>
       <div>${q.tags.map(t => `<span class="tag-pill">${escapeHtml(t)}</span>`).join("")}</div>
       <div class="card-actions">
-        <a href="/api/questions/${q.id}" target="_blank">details</a>
+        <button class="secondary" onclick="toggleDetails(${q.id})" id="details-btn-${q.id}">Details ▾</button>
         <button class="secondary" onclick="deleteQuestion(${q.id})">delete</button>
       </div>
+      <div class="q-detail" id="q-detail-${q.id}" style="display:none;"></div>
+    </div>
+  `;
+}
+
+function toggleDetails(id) {
+  const panel = document.getElementById(`q-detail-${id}`);
+  const btn = document.getElementById(`details-btn-${id}`);
+  const isOpen = panel.style.display !== "none";
+  if (isOpen) {
+    panel.style.display = "none";
+    panel.innerHTML = "";
+    btn.textContent = "Details ▾";
+    return;
+  }
+  panel.style.display = "block";
+  btn.textContent = "Details ▴";
+  renderDetailPanel(id);
+}
+
+function renderDetailPanel(id) {
+  const q = findCachedQuestion(id);
+  const panel = document.getElementById(`q-detail-${id}`);
+  if (!q) return;
+
+  const pages = q.question_images.map(img => `
+    <div class="detail-page">
+      ${img.page_number ? `<span class="detail-page-label">Page ${img.page_number}</span>` : ""}
+      <img class="detail-full-img" src="/files/${img.file_path}" alt="Question ${q.question_number || ""}">
     </div>
   `).join("");
+
+  panel.innerHTML = `
+    ${pages || `<p class="muted">No crop image (page ${q.page_number || "?"})</p>`}
+    ${q.question_number ? `<div class="muted">Question ${escapeHtml(q.question_number)}</div>` : ""}
+    ${q.notes ? `<div class="q-notes">${escapeHtml(q.notes)}</div>` : ""}
+    <div class="answer-section" id="answer-section-${q.id}"></div>
+  `;
+  renderAnswerSection(id);
+}
+
+function renderAnswerSection(id) {
+  const q = findCachedQuestion(id);
+  const el = document.getElementById(`answer-section-${id}`);
+  if (!q || !el) return;
+
+  const uploadPrompt = `
+    <label class="answer-upload-label">
+      ${q.answer_images.length ? "Add another solution page" : "Attach a worked solution (image, PDF, or Word doc)"}
+      <input type="file" multiple accept=".pdf,.doc,.docx,.png,.jpg,.jpeg" onchange="uploadAnswer(${id}, this.files)">
+    </label>
+  `;
+
+  if (q.answer_images.length > 0) {
+    const pages = q.answer_images.map(img => {
+      const isImage = /\.(png|jpe?g)$/i.test(img.file_path);
+      return `
+        <div class="detail-page">
+          ${img.page_number ? `<span class="detail-page-label">Page ${img.page_number}</span>` : ""}
+          ${isImage
+            ? `<img class="detail-full-img" src="/files/${img.file_path}" alt="Worked solution">`
+            : `<a href="/files/${img.file_path}" target="_blank">Open worked solution file</a>`
+          }
+          <button type="button" class="secondary small" onclick="removeAnswerImage(${id}, ${img.id})">Remove this page</button>
+        </div>
+      `;
+    }).join("");
+
+    el.innerHTML = `
+      <button type="button" class="answer-toggle" onclick="toggleAnswer(${id})">Answer ▾</button>
+      <div class="answer-body" id="answer-body-${id}" style="display:none;">
+        ${pages}
+        ${uploadPrompt}
+      </div>
+    `;
+  } else {
+    el.innerHTML = `
+      <p class="hint">No worked solution linked yet.</p>
+      ${uploadPrompt}
+    `;
+  }
+}
+
+function toggleAnswer(id) {
+  const body = document.getElementById(`answer-body-${id}`);
+  body.style.display = body.style.display === "none" ? "block" : "none";
+}
+
+// Accepts a FileList so you can attach a multi-page solution in one go --
+// each file becomes its own page/part linked to the question, uploaded
+// in the order they were selected.
+async function uploadAnswer(id, files) {
+  if (!files || files.length === 0) return;
+  const el = document.getElementById(`answer-section-${id}`);
+  el.innerHTML = `<p class="muted">Uploading...</p>`;
+  try {
+    let updated;
+    for (const file of files) {
+      const form = new FormData();
+      form.append("file", file);
+      updated = await fetchJSON(`/api/questions/${id}/answer`, { method: "POST", body: form });
+    }
+    const idx = browseResultsCache.findIndex(q => q.id === id);
+    if (idx !== -1) browseResultsCache[idx] = updated;
+    renderAnswerSection(id);
+  } catch (err) {
+    el.innerHTML = `<p class="status-msg err">Error: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function removeAnswerImage(id, imageId) {
+  if (!confirm("Remove this page of the worked solution?")) return;
+  const updated = await fetchJSON(`/api/questions/${id}/images/${imageId}`, { method: "DELETE" });
+  const idx = browseResultsCache.findIndex(q => q.id === id);
+  if (idx !== -1) browseResultsCache[idx] = updated;
+  renderAnswerSection(id);
 }
 
 async function deleteQuestion(id) {
@@ -495,8 +818,12 @@ async function deleteQuestion(id) {
 // Init
 // ---------------------------------------------------------------
 window.deletePaper = deletePaper;
-window.openChop = openChop;
+window.openChopById = openChopById;
 window.deleteQuestion = deleteQuestion;
+window.toggleDetails = toggleDetails;
+window.toggleAnswer = toggleAnswer;
+window.uploadAnswer = uploadAnswer;
+window.removeAnswerImage = removeAnswerImage;
 
 loadDropdownData();
 refreshBrowse();

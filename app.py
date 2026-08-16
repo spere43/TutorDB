@@ -88,14 +88,24 @@ class Question(db.Model):
     topic = db.Column(db.String(120), nullable=False)
     subtopic = db.Column(db.String(120), nullable=True)
     difficulty = db.Column(db.String(2), nullable=False)  # SF / CF / CU
-    crop_image_path = db.Column(db.String(300), nullable=True)  # chopped-out question image
-    page_number = db.Column(db.Integer, nullable=True)  # fallback if not cropped
+    page_number = db.Column(db.Integer, nullable=True)  # page the question STARTS on
     notes = db.Column(db.Text, nullable=True)
     date_added = db.Column(db.DateTime, default=datetime.utcnow)
 
     tags = db.relationship("Tag", secondary=question_tags, backref="questions")
 
+    # A question (or its worked solution) can span several pages/regions --
+    # each chopped box, or each manually-uploaded solution page, becomes one
+    # QuestionImage row here rather than a single fixed file path. `kind`
+    # separates the question's own images from its answer's.
+    images = db.relationship(
+        "QuestionImage", backref="question",
+        cascade="all, delete-orphan", order_by="QuestionImage.order_index",
+    )
+
     def to_dict(self):
+        q_images = [i.to_dict() for i in self.images if i.kind == "question"]
+        a_images = [i.to_dict() for i in self.images if i.kind == "answer"]
         return {
             "id": self.id,
             "paper_id": self.paper_id,
@@ -103,13 +113,40 @@ class Question(db.Model):
             "topic": self.topic,
             "subtopic": self.subtopic,
             "difficulty": self.difficulty,
-            "crop_image_path": self.crop_image_path,
             "page_number": self.page_number,
             "notes": self.notes,
+            "question_images": q_images,
+            "answer_images": a_images,
+            "has_answer": len(a_images) > 0,
             "tags": [t.name for t in self.tags],
             "school": self.paper.school,
             "subject": self.paper.subject,
             "exam_type": self.paper.exam_type,
+        }
+
+
+class QuestionImage(db.Model):
+    """One page/region belonging to a question or its worked solution.
+    A question that spans multiple pages, or has a multi-page solution,
+    is just several rows here sharing a question_id, ordered by
+    order_index -- there's no separate "multi-page question" concept,
+    it falls out naturally from allowing more than one row per kind."""
+    __tablename__ = "question_images"
+    id = db.Column(db.Integer, primary_key=True)
+    question_id = db.Column(db.Integer, db.ForeignKey("questions.id"), nullable=False)
+    kind = db.Column(db.String(10), nullable=False)  # "question" or "answer"
+    page_number = db.Column(db.Integer, nullable=True)
+    file_path = db.Column(db.String(300), nullable=False)
+    order_index = db.Column(db.Integer, nullable=False, default=0)
+    date_added = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "page_number": self.page_number,
+            "file_path": self.file_path,
+            "order_index": self.order_index,
         }
 
 
@@ -209,6 +246,7 @@ def list_questions():
     difficulty = request.args.get("difficulty")
     exam_type = request.args.get("exam_type")
     year_level = request.args.get("year_level")
+    paper_id = request.args.get("paper_id")
     tags = request.args.getlist("tag")
 
     if subject:
@@ -223,6 +261,8 @@ def list_questions():
         query = query.filter(Paper.exam_type == exam_type)
     if year_level:
         query = query.filter(Paper.year_level == int(year_level))
+    if paper_id:
+        query = query.filter(Question.paper_id == int(paper_id))
 
     results = query.all()
 
@@ -283,6 +323,17 @@ def create_question():
     return jsonify(question.to_dict()), 201
 
 
+@app.route("/api/questions/<int:question_id>", methods=["GET"])
+def get_question(question_id):
+    """Fetches full detail for one question. The frontend's Browse tab
+    already has this data client-side after listing, but this exists so
+    the question detail is directly linkable/fetchable (and so hitting the
+    URL doesn't 405, which is what "details" was doing before this route
+    existed -- only PATCH/DELETE were registered for this path)."""
+    question = Question.query.get_or_404(question_id)
+    return jsonify(question.to_dict())
+
+
 @app.route("/api/questions/<int:question_id>", methods=["PATCH"])
 def update_question(question_id):
     """Partial update — send only the fields you want to change."""
@@ -321,14 +372,85 @@ def delete_question(question_id):
 
 @app.route("/api/questions/<int:question_id>/crop", methods=["POST"])
 def upload_crop(question_id):
-    """Upload a cropped image of this question (from the chopping UI)."""
+    """Adds ONE more page/region to this question. Call it again for a
+    question that continues on another page or in another region -- each
+    call just appends another part in order, rather than replacing
+    anything, so a multi-page question is just several calls."""
     question = Question.query.get_or_404(question_id)
     if "image" not in request.files or request.files["image"].filename == "":
         return jsonify({"error": "image file is required"}), 400
 
     image = request.files["image"]
+    page_number = request.form.get("page_number", type=int)
     crop_path = save_upload(image, subfolder=os.path.join("crops", secure_filename(question.paper.subject)))
-    question.crop_image_path = crop_path
+
+    next_order = db.session.query(db.func.coalesce(db.func.max(QuestionImage.order_index), -1)) \
+        .filter_by(question_id=question.id, kind="question").scalar() + 1
+    part = QuestionImage(question_id=question.id, kind="question", page_number=page_number,
+                          file_path=crop_path, order_index=next_order)
+    db.session.add(part)
+    db.session.commit()
+    return jsonify(question.to_dict())
+
+
+@app.route("/api/questions/<int:question_id>/answer", methods=["POST"])
+def upload_answer(question_id):
+    """
+    Adds ONE more page/part to this question's worked solution -- same
+    endpoint whether it comes from chopping the solutions PDF alongside
+    the paper, or from uploading a worked solution written up later.
+    Appends rather than replaces, so a multi-page solution (or one you
+    add to over time as you write up more of it) is just several calls.
+    Expects multipart/form-data with a "file" field and optional
+    "page_number".
+    """
+    question = Question.query.get_or_404(question_id)
+    if "file" not in request.files or request.files["file"].filename == "":
+        return jsonify({"error": "file is required"}), 400
+
+    file = request.files["file"]
+    if not allowed_file(file.filename):
+        return jsonify({"error": "file type not allowed"}), 400
+
+    page_number = request.form.get("page_number", type=int)
+    answer_path = save_upload(file, subfolder=os.path.join("answers", secure_filename(question.paper.subject)))
+
+    next_order = db.session.query(db.func.coalesce(db.func.max(QuestionImage.order_index), -1)) \
+        .filter_by(question_id=question.id, kind="answer").scalar() + 1
+    part = QuestionImage(question_id=question.id, kind="answer", page_number=page_number,
+                          file_path=answer_path, order_index=next_order)
+    db.session.add(part)
+    db.session.commit()
+    return jsonify(question.to_dict())
+
+
+@app.route("/api/questions/<int:question_id>/answer", methods=["DELETE"])
+def delete_all_answers(question_id):
+    """Removes ALL worked-solution parts linked to this question (e.g. to
+    start over with a fresh upload). To remove just one page of a
+    multi-page solution instead, use
+    DELETE /api/questions/<id>/images/<image_id>."""
+    question = Question.query.get_or_404(question_id)
+    for img in [i for i in question.images if i.kind == "answer"]:
+        old_path = os.path.join(FILES_DIR, img.file_path)
+        if os.path.exists(old_path):
+            os.remove(old_path)
+        db.session.delete(img)
+    db.session.commit()
+    return jsonify(question.to_dict())
+
+
+@app.route("/api/questions/<int:question_id>/images/<int:image_id>", methods=["DELETE"])
+def delete_question_image(question_id, image_id):
+    """Removes one specific page/part (a question crop or one answer
+    page) without touching the rest -- what you want for a multi-page
+    question/solution where only one page needs redoing."""
+    question = Question.query.get_or_404(question_id)
+    img = QuestionImage.query.filter_by(id=image_id, question_id=question.id).first_or_404()
+    old_path = os.path.join(FILES_DIR, img.file_path)
+    if os.path.exists(old_path):
+        os.remove(old_path)
+    db.session.delete(img)
     db.session.commit()
     return jsonify(question.to_dict())
 
@@ -374,4 +496,48 @@ def serve_file(filepath):
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
+        # db.create_all() only creates tables that don't exist yet -- it
+        # won't add new columns to a table that's already on disk, or move
+        # data for you. Since this project isn't using Flask-Migrate/Alembic,
+        # any schema change needs a small manual migration here too.
+        inspector = db.inspect(db.engine)
+        existing_cols = {c["name"] for c in inspector.get_columns("questions")}
+        if "answer_file_path" not in existing_cols:
+            with db.engine.begin() as conn:
+                conn.execute(db.text("ALTER TABLE questions ADD COLUMN answer_file_path VARCHAR(300)"))
+            existing_cols.add("answer_file_path")
+
+        # Multi-page support: question/answer images now live in their own
+        # question_images table (one question can have several page crops)
+        # instead of a single crop_image_path / answer_file_path column. If
+        # this is an existing DB with old-style single-file questions
+        # (e.g. from your earlier workflow test), copy those in as each
+        # question's first part so nothing gets orphaned by the change.
+        if "crop_image_path" in existing_cols or "answer_file_path" in existing_cols:
+            with db.engine.begin() as conn:
+                cols = ", ".join(c for c in ["id", "crop_image_path", "answer_file_path"] if c in existing_cols or c == "id")
+                rows = conn.execute(db.text(f"SELECT {cols} FROM questions")).fetchall()
+                for row in rows:
+                    row = row._mapping
+                    qid = row["id"]
+                    crop_path = row.get("crop_image_path")
+                    answer_path = row.get("answer_file_path")
+                    if crop_path:
+                        exists = conn.execute(db.text(
+                            "SELECT 1 FROM question_images WHERE question_id=:qid AND kind='question' LIMIT 1"
+                        ), {"qid": qid}).fetchone()
+                        if not exists:
+                            conn.execute(db.text(
+                                "INSERT INTO question_images (question_id, kind, file_path, order_index, date_added) "
+                                "VALUES (:qid, 'question', :fp, 0, :now)"
+                            ), {"qid": qid, "fp": crop_path, "now": datetime.utcnow()})
+                    if answer_path:
+                        exists = conn.execute(db.text(
+                            "SELECT 1 FROM question_images WHERE question_id=:qid AND kind='answer' LIMIT 1"
+                        ), {"qid": qid}).fetchone()
+                        if not exists:
+                            conn.execute(db.text(
+                                "INSERT INTO question_images (question_id, kind, file_path, order_index, date_added) "
+                                "VALUES (:qid, 'answer', :fp, 0, :now)"
+                            ), {"qid": qid, "fp": answer_path, "now": datetime.utcnow()})
     app.run(host="0.0.0.0", port=5000, debug=True)

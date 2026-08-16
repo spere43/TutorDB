@@ -233,6 +233,67 @@ form#add-paper-form {
   border-radius: 8px;
 }
 
+/* Inline expand panel under a question card, shown by the "details" button */
+.q-detail {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.detail-full-img {
+  width: 100%;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: white;
+}
+
+.q-notes {
+  font-size: 13px;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.answer-section {
+  border-top: 1px dashed var(--border);
+  padding-top: 8px;
+}
+
+.answer-toggle {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+.answer-body {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.answer-upload-label {
+  display: inline-block;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.answer-upload-label input {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+button.small {
+  font-size: 11px;
+  padding: 4px 8px;
+  width: fit-content;
+}
+
 /* Papers list (Add tab + Chop picker) */
 .paper-row {
   display: flex;
@@ -301,6 +362,25 @@ form#add-paper-form {
   flex-wrap: wrap;
 }
 
+.chop-mode-switch {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.mode-btn {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 8px 14px;
+}
+
+.mode-btn.active {
+  background: var(--accent, #4f8cff);
+  color: white;
+  border-color: var(--accent, #4f8cff);
+}
+
 .pdf-canvas-wrap {
   position: relative;
   flex: 1 1 0;
@@ -340,7 +420,18 @@ form#add-paper-form {
   margin-bottom: 12px;
 }
 
+.crop-preview-wrap-box {
+  margin-bottom: 12px;
+}
+
 #crop-preview {
+  width: 100%;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: white;
+}
+
+.crop-preview-img {
   width: 100%;
   border-radius: 6px;
   border: 1px solid var(--border);
@@ -364,6 +455,65 @@ form#add-paper-form {
 .diff-btn[data-diff="SF"].selected { background: var(--sf); color: white; border-color: var(--sf); }
 .diff-btn[data-diff="CF"].selected { background: var(--cf); color: white; border-color: var(--cf); }
 .diff-btn[data-diff="CU"].selected { background: var(--cu); color: white; border-color: var(--cu); }
+
+/* Multi-page staging strip (chop tab) */
+.staged-parts-strip {
+  display: none;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+.staged-part {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #2b2e35;
+}
+.staged-part img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.staged-part-page {
+  position: absolute;
+  bottom: 2px;
+  left: 2px;
+  font-size: 10px;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.staged-part-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  line-height: 16px;
+  padding: 0;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  border: none;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* Multi-page display (browse detail panel) */
+.detail-page { margin-bottom: 10px; }
+.detail-page-label {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.page-count-badge {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: -4px;
+  margin-bottom: 4px;
+}
 
 @media (max-width: 700px) {
   .chop-main { flex-direction: column; }

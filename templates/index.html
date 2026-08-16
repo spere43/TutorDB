@@ -119,17 +119,24 @@
         </div>
       </div>
 
+      <div class="chop-mode-switch" id="chop-mode-switch" style="display:none;">
+        <button type="button" class="mode-btn active" data-mode="questions">Chop Questions</button>
+        <button type="button" class="mode-btn" data-mode="answers">Chop Answers</button>
+      </div>
+
       <div class="chop-main">
         <div class="pdf-canvas-wrap" id="pdf-canvas-wrap">
           <canvas id="pdf-canvas"></canvas>
           <canvas id="overlay-canvas"></canvas>
         </div>
 
-        <div class="chop-form">
-          <p class="hint">Draw a box around a question on the page (click/tap and drag).</p>
-          <div id="crop-preview-wrap" style="display:none;">
-            <img id="crop-preview" alt="cropped question preview">
+        <div class="chop-form" id="chop-form-questions">
+          <p class="hint">Draw a box around a question on the page (click/tap and drag). If it continues on another page, draw that too and add it as another part before saving.</p>
+          <div id="crop-preview-wrap" class="crop-preview-wrap-box" style="display:none;">
+            <img id="crop-preview" class="crop-preview-img" alt="cropped question preview">
           </div>
+          <button type="button" id="add-question-part" class="secondary small" disabled>+ Add another page/part to this question</button>
+          <div id="question-staged-parts" class="staged-parts-strip"></div>
 
           <label>Question number
             <input type="text" id="q-number" placeholder="e.g. 4b">
@@ -161,6 +168,22 @@
 
           <button id="save-question" disabled>Save question</button>
           <div id="chop-status" class="status-msg"></div>
+        </div>
+
+        <div class="chop-form" id="chop-form-answers" style="display:none;">
+          <p class="hint">Draw a box around a worked solution, then pick which question it answers. If the solution spans several pages, draw each and add as another part before saving.</p>
+          <div id="answer-crop-preview-wrap" class="crop-preview-wrap-box" style="display:none;">
+            <img id="answer-crop-preview" class="crop-preview-img" alt="cropped answer preview">
+          </div>
+          <button type="button" id="add-answer-part" class="secondary small" disabled>+ Add another page/part to this answer</button>
+          <div id="answer-staged-parts" class="staged-parts-strip"></div>
+
+          <label>Link to question
+            <select id="answer-q-select"></select>
+          </label>
+
+          <button id="save-answer" disabled>Save answer</button>
+          <div id="answer-chop-status" class="status-msg"></div>
         </div>
       </div>
     </div>
