@@ -46,6 +46,7 @@ class Paper(db.Model):
     school = db.Column(db.String(120), nullable=False)
     subject = db.Column(db.String(80), nullable=False)
     year_level = db.Column(db.Integer, nullable=False)  # 11 or 12
+    unit = db.Column(db.Integer, nullable=True)  # QCE unit: 1, 2, 3, or 4 -- what topics get scoped under
     exam_type = db.Column(db.String(50), nullable=False)  # internal / mock / QCAA-style etc
     exam_year = db.Column(db.Integer, nullable=True)
     file_path = db.Column(db.String(300), nullable=False)  # path to original PDF/doc
@@ -60,6 +61,7 @@ class Paper(db.Model):
             "school": self.school,
             "subject": self.subject,
             "year_level": self.year_level,
+            "unit": self.unit,
             "exam_type": self.exam_type,
             "exam_year": self.exam_year,
             "file_path": self.file_path,
@@ -186,11 +188,15 @@ def create_paper():
     school = request.form.get("school")
     subject = request.form.get("subject")
     year_level = request.form.get("year_level")
+    unit = request.form.get("unit")
     exam_type = request.form.get("exam_type")
     exam_year = request.form.get("exam_year")
 
-    if not all([school, subject, year_level, exam_type]):
-        return jsonify({"error": "school, subject, year_level, exam_type are required"}), 400
+    if not all([school, subject, year_level, unit, exam_type]):
+        return jsonify({"error": "school, subject, year_level, unit, exam_type are required"}), 400
+
+    if unit not in {"1", "2", "3", "4"}:
+        return jsonify({"error": "unit must be 1, 2, 3, or 4"}), 400
 
     if "file" not in request.files or request.files["file"].filename == "":
         return jsonify({"error": "original paper file is required"}), 400
@@ -211,6 +217,7 @@ def create_paper():
         school=school,
         subject=subject,
         year_level=int(year_level),
+        unit=int(unit),
         exam_type=exam_type,
         exam_year=int(exam_year) if exam_year else None,
         file_path=file_path,
@@ -242,7 +249,9 @@ def list_questions():
 
     subject = request.args.get("subject")
     school = request.args.get("school")
+    unit = request.args.get("unit")
     topic = request.args.get("topic")
+    subtopic = request.args.get("subtopic")
     difficulty = request.args.get("difficulty")
     exam_type = request.args.get("exam_type")
     year_level = request.args.get("year_level")
@@ -253,8 +262,12 @@ def list_questions():
         query = query.filter(Paper.subject == subject)
     if school:
         query = query.filter(Paper.school == school)
+    if unit:
+        query = query.filter(Paper.unit == int(unit))
     if topic:
         query = query.filter(Question.topic == topic)
+    if subtopic:
+        query = query.filter(Question.subtopic == subtopic)
     if difficulty:
         query = query.filter(Question.difficulty == difficulty.upper())
     if exam_type:
@@ -463,15 +476,39 @@ def list_tags():
     return jsonify([t.name for t in tags])
 
 
-# ---------- Topics (distinct list, useful for populating dropdowns) ----------
+# ---------- Topics / subtopics (distinct lists, scoped for cascading dropdowns) ----------
 
 @app.route("/api/topics", methods=["GET"])
 def list_topics():
+    """Topics are scoped to a subject+unit rather than global, so the
+    dropdown only ever shows topics that actually belong to what you've
+    selected (e.g. Physics Unit 4 topics, not every topic in the DB)."""
     subject = request.args.get("subject")
+    unit = request.args.get("unit")
     query = db.session.query(Question.topic).join(Paper).distinct()
     if subject:
         query = query.filter(Paper.subject == subject)
+    if unit:
+        query = query.filter(Paper.unit == int(unit))
     return jsonify(sorted([t[0] for t in query.all()]))
+
+
+@app.route("/api/subtopics", methods=["GET"])
+def list_subtopics():
+    """Subtopics scoped to subject+unit+topic (e.g. Bernoulli/Binomial
+    under Maths Methods Unit 3's "Discrete random variables" topic)."""
+    subject = request.args.get("subject")
+    unit = request.args.get("unit")
+    topic = request.args.get("topic")
+    query = db.session.query(Question.subtopic).join(Paper) \
+        .filter(Question.subtopic.isnot(None)).distinct()
+    if subject:
+        query = query.filter(Paper.subject == subject)
+    if unit:
+        query = query.filter(Paper.unit == int(unit))
+    if topic:
+        query = query.filter(Question.topic == topic)
+    return jsonify(sorted([s[0] for s in query.all()]))
 
 
 @app.route("/api/subjects", methods=["GET"])
@@ -506,6 +543,13 @@ if __name__ == "__main__":
             with db.engine.begin() as conn:
                 conn.execute(db.text("ALTER TABLE questions ADD COLUMN answer_file_path VARCHAR(300)"))
             existing_cols.add("answer_file_path")
+
+        existing_paper_cols = {c["name"] for c in inspector.get_columns("papers")}
+        if "unit" not in existing_paper_cols:
+            with db.engine.begin() as conn:
+                conn.execute(db.text("ALTER TABLE papers ADD COLUMN unit INTEGER"))
+            # existing papers from before "unit" existed are left NULL --
+            # they'll just show "no unit" in the UI until you edit them.
 
         # Multi-page support: question/answer images now live in their own
         # question_images table (one question can have several page crops)

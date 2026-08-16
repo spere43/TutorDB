@@ -49,18 +49,93 @@ function escapeHtml(str) {
 }
 
 async function loadDropdownData() {
-  const [subjects, schools, topics] = await Promise.all([
+  // Topics/subtopics are intentionally NOT loaded here -- they're scoped
+  // to a subject+unit (and subtopics further to a topic), so they're
+  // fetched on demand as those cascading selections are made. Loading
+  // a flat global topic list here was the bug: every subject's topics
+  // showed up regardless of what you'd picked.
+  const [subjects, schools] = await Promise.all([
     fetchJSON("/api/subjects"),
     fetchJSON("/api/schools"),
-    fetchJSON("/api/topics"),
   ]);
   populateDatalist("subject-list", subjects);
   populateDatalist("school-list", schools);
-  populateDatalist("topic-list", topics);
   populateSelect("f-subject", subjects, "Subject: any");
   populateSelect("f-school", schools, "School: any");
-  populateSelect("f-topic", topics, "Topic: any");
 }
+
+// ---------------------------------------------------------------
+// Browse filter cascade: Subject -> Unit -> Topic -> Subtopic
+// Each level is disabled with a placeholder until the level above it
+// has a value, and picking a new value at any level clears/disables
+// everything below it (since a subtopic list, say, is meaningless
+// once the topic it belonged to has changed).
+// ---------------------------------------------------------------
+function setSelectState(id, enabled, placeholder, options) {
+  const el = document.getElementById(id);
+  el.disabled = !enabled;
+  if (options) {
+    el.innerHTML = `<option value="">${placeholder}</option>` +
+      options.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("");
+  } else {
+    el.innerHTML = `<option value="">${placeholder}</option>`;
+  }
+}
+
+const UNIT_OPTIONS = ["1", "2", "3", "4"];
+
+function resetUnitDown() {
+  setSelectState("f-unit", false, "Unit: pick a subject first");
+  resetTopicDown();
+}
+function resetTopicDown() {
+  setSelectState("f-topic", false, "Topic: pick a unit first");
+  resetSubtopicDown();
+}
+function resetSubtopicDown() {
+  setSelectState("f-subtopic", false, "Subtopic: pick a topic first");
+}
+
+document.getElementById("f-subject").addEventListener("change", () => {
+  const subject = document.getElementById("f-subject").value;
+  if (subject) {
+    setSelectState("f-unit", true, "Unit: any", UNIT_OPTIONS.map(u => `Unit ${u}`));
+    // store the raw unit numbers as values via a second pass, since the
+    // label ("Unit 3") and the filter value ("3") differ here
+    const unitEl = document.getElementById("f-unit");
+    unitEl.innerHTML = `<option value="">Unit: any</option>` +
+      UNIT_OPTIONS.map(u => `<option value="${u}">Unit ${u}</option>`).join("");
+  } else {
+    resetUnitDown();
+  }
+  resetTopicDown();
+});
+
+document.getElementById("f-unit").addEventListener("change", async () => {
+  const subject = document.getElementById("f-subject").value;
+  const unit = document.getElementById("f-unit").value;
+  if (subject && unit) {
+    const topics = await fetchJSON(`/api/topics?subject=${encodeURIComponent(subject)}&unit=${encodeURIComponent(unit)}`);
+    setSelectState("f-topic", true, topics.length ? "Topic: any" : "Topic: none chopped yet", topics);
+  } else {
+    resetTopicDown();
+  }
+  resetSubtopicDown();
+});
+
+document.getElementById("f-topic").addEventListener("change", async () => {
+  const subject = document.getElementById("f-subject").value;
+  const unit = document.getElementById("f-unit").value;
+  const topic = document.getElementById("f-topic").value;
+  if (subject && unit && topic) {
+    const subtopics = await fetchJSON(
+      `/api/subtopics?subject=${encodeURIComponent(subject)}&unit=${encodeURIComponent(unit)}&topic=${encodeURIComponent(topic)}`
+    );
+    setSelectState("f-subtopic", true, subtopics.length ? "Subtopic: any" : "Subtopic: none set yet", subtopics);
+  } else {
+    resetSubtopicDown();
+  }
+});
 
 // ---------------------------------------------------------------
 // ADD PAPER
@@ -75,6 +150,7 @@ document.getElementById("add-paper-form").addEventListener("submit", async (e) =
   formData.append("school", document.getElementById("p-school").value);
   formData.append("subject", document.getElementById("p-subject").value);
   formData.append("year_level", document.getElementById("p-year-level").value);
+  formData.append("unit", document.getElementById("p-unit").value);
   formData.append("exam_type", document.getElementById("p-exam-type").value);
   const examYear = document.getElementById("p-exam-year").value;
   if (examYear) formData.append("exam_year", examYear);
@@ -105,7 +181,7 @@ async function refreshPapersList() {
   el.innerHTML = papers.map(p => `
     <div class="paper-row">
       <div class="paper-info">
-        <b>${escapeHtml(p.school)}</b> — ${escapeHtml(p.subject)} (Y${p.year_level}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""})
+        <b>${escapeHtml(p.school)}</b> — ${escapeHtml(p.subject)} (Y${p.year_level}${p.unit ? ", Unit " + p.unit : ""}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""})
         <br><span><a href="/files/${p.file_path}" target="_blank">view original</a>${p.solution_file_path ? ` | <a href="/files/${p.solution_file_path}" target="_blank">view solutions</a>` : ""}</span>
       </div>
       <button class="secondary" onclick="deletePaper(${p.id})">Delete</button>
@@ -135,7 +211,7 @@ async function refreshChopPicker() {
   el.innerHTML = papers.map(p => `
     <div class="paper-row">
       <div class="paper-info">
-        <b>${escapeHtml(p.school)}</b> — ${escapeHtml(p.subject)} (Y${p.year_level}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""})
+        <b>${escapeHtml(p.school)}</b> — ${escapeHtml(p.subject)} (Y${p.year_level}${p.unit ? ", Unit " + p.unit : ""}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""})
         ${p.solution_file_path ? `<br><span class="muted">Has a solutions file</span>` : ""}
       </div>
       <button onclick="openChopById(${p.id})">Chop this paper</button>
@@ -187,7 +263,8 @@ async function openChop(paper) {
 
   document.getElementById("chop-picker").style.display = "none";
   document.getElementById("chop-workspace").style.display = "block";
-  document.getElementById("chop-paper-title").textContent = `${paper.school} — ${paper.subject}`;
+  document.getElementById("chop-paper-title").textContent =
+    `${paper.school} — ${paper.subject}${paper.unit ? " (Unit " + paper.unit + ")" : ""}`;
 
   const modeSwitch = document.getElementById("chop-mode-switch");
   document.querySelectorAll(".mode-btn").forEach(b => b.classList.remove("active"));
@@ -195,10 +272,46 @@ async function openChop(paper) {
   modeSwitch.style.display = paper.solution_file_path ? "flex" : "none";
   showChopFormForMode();
 
+  await loadTopicsForCurrentPaper();
   await loadPdfForMode();
   resetQuestionForm();
   resetAnswerForm();
 }
+
+// Scopes the topic datalist to this paper's subject+unit (instead of a
+// global list of every topic ever chopped) -- this is what makes typing
+// into "Topic" while chopping only suggest topics that actually belong
+// to the subject/unit you're working in.
+async function loadTopicsForCurrentPaper() {
+  if (!currentPaper || !currentPaper.unit) {
+    populateDatalist("topic-list", []);
+    populateDatalist("subtopic-list", []);
+    return;
+  }
+  const topics = await fetchJSON(
+    `/api/topics?subject=${encodeURIComponent(currentPaper.subject)}&unit=${encodeURIComponent(currentPaper.unit)}`
+  );
+  populateDatalist("topic-list", topics);
+  populateDatalist("subtopic-list", []); // repopulated once a topic is entered
+}
+
+// Debounced: refreshes the subtopic datalist to match whatever topic
+// value is currently typed/selected, scoped to this paper's subject+unit.
+let subtopicFetchTimer = null;
+document.getElementById("q-topic").addEventListener("input", () => {
+  clearTimeout(subtopicFetchTimer);
+  subtopicFetchTimer = setTimeout(async () => {
+    const topic = document.getElementById("q-topic").value.trim();
+    if (!currentPaper || !currentPaper.unit || !topic) {
+      populateDatalist("subtopic-list", []);
+      return;
+    }
+    const subtopics = await fetchJSON(
+      `/api/subtopics?subject=${encodeURIComponent(currentPaper.subject)}&unit=${encodeURIComponent(currentPaper.unit)}&topic=${encodeURIComponent(topic)}`
+    );
+    populateDatalist("subtopic-list", subtopics);
+  }, 250);
+});
 
 // Loads either the paper's original file or its solutions file into
 // pdf.js, depending on which mode we're chopping in.
@@ -629,8 +742,9 @@ document.getElementById("save-answer").addEventListener("click", async () => {
 // ---------------------------------------------------------------
 document.getElementById("apply-filters").addEventListener("click", refreshBrowse);
 document.getElementById("clear-filters").addEventListener("click", () => {
-  ["f-subject", "f-school", "f-topic", "f-difficulty", "f-exam-type"].forEach(id => document.getElementById(id).value = "");
+  ["f-subject", "f-school", "f-difficulty", "f-exam-type"].forEach(id => document.getElementById(id).value = "");
   document.getElementById("f-tags").value = "";
+  resetUnitDown(); // also clears/disables topic + subtopic beneath it
   refreshBrowse();
 });
 
@@ -640,14 +754,18 @@ async function refreshBrowse() {
   const params = new URLSearchParams();
   const subject = document.getElementById("f-subject").value;
   const school = document.getElementById("f-school").value;
+  const unit = document.getElementById("f-unit").value;
   const topic = document.getElementById("f-topic").value;
+  const subtopic = document.getElementById("f-subtopic").value;
   const difficulty = document.getElementById("f-difficulty").value;
   const examType = document.getElementById("f-exam-type").value;
   const tagsRaw = document.getElementById("f-tags").value;
 
   if (subject) params.append("subject", subject);
   if (school) params.append("school", school);
+  if (unit) params.append("unit", unit);
   if (topic) params.append("topic", topic);
+  if (subtopic) params.append("subtopic", subtopic);
   if (difficulty) params.append("difficulty", difficulty);
   if (examType) params.append("exam_type", examType);
   if (tagsRaw) tagsRaw.split(",").map(t => t.trim()).filter(Boolean).forEach(t => params.append("tag", t));

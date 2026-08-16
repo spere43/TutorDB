@@ -23,8 +23,10 @@
   <section id="tab-browse" class="tab-panel active">
     <div class="filter-bar">
       <select id="f-subject"><option value="">Subject: any</option></select>
+      <select id="f-unit" disabled><option value="">Unit: pick a subject first</option></select>
+      <select id="f-topic" disabled><option value="">Topic: pick a unit first</option></select>
+      <select id="f-subtopic" disabled><option value="">Subtopic: pick a topic first</option></select>
       <select id="f-school"><option value="">School: any</option></select>
-      <select id="f-topic"><option value="">Topic: any</option></select>
       <select id="f-difficulty">
         <option value="">Difficulty: any</option>
         <option value="SF">SF</option>
@@ -64,6 +66,16 @@
         <select id="p-year-level" required>
           <option value="11">11</option>
           <option value="12">12</option>
+        </select>
+      </label>
+
+      <label>Unit
+        <select id="p-unit" required>
+          <option value="">Choose a unit</option>
+          <option value="1">Unit 1</option>
+          <option value="2">Unit 2</option>
+          <option value="3">Unit 3</option>
+          <option value="4">Unit 4</option>
         </select>
       </label>
 
@@ -148,7 +160,8 @@
           </label>
 
           <label>Subtopic (optional)
-            <input type="text" id="q-subtopic">
+            <input type="text" id="q-subtopic" list="subtopic-list">
+            <datalist id="subtopic-list"></datalist>
           </label>
 
           <label>Difficulty</label>
