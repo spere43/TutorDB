@@ -1,9 +1,12 @@
-from flask import Flask, jsonify, request, send_from_directory, render_template
+from flask import Flask, jsonify, request, send_from_directory, render_template, send_file
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename
 from datetime import datetime
 import os
 import uuid
+import sqlite3
+import zipfile
+import time
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -184,6 +187,77 @@ def status():
         "paper_count": Paper.query.count(),
         "question_count": Question.query.count(),
     })
+
+
+@app.route("/api/backup", methods=["GET"])
+def download_backup():
+    """
+    Streams a single zip containing everything needed to run this exact
+    database on a different machine: a clean snapshot of the SQLite DB
+    plus every uploaded/cropped/answer file, in the same relative folder
+    layout the app already expects (questions.db at the zip root,
+    files/... underneath it, matching data/files/... here).
+
+    Restoring on a new machine is just: stop the app there, extract this
+    zip's contents into that machine's data/ folder (replacing whatever's
+    there), start the app -- no relinking needed, since every file_path
+    stored in the DB was already relative to data/files/ to begin with.
+
+    Uses SQLite's own backup API rather than copying the .db file's raw
+    bytes directly, so a write happening at the same moment as the
+    backup can't produce a torn/corrupted snapshot. Writes the zip to a
+    temp file on disk (not in memory) since this device's RAM is small
+    relative to a growing multi-GB question bank.
+
+    Cleanup: Flask's `call_on_close` hook for deleting the temp file
+    after sending is NOT reliable here -- send_file can hand the file off
+    to the WSGI server's own sendfile mechanism in a way that bypasses
+    that hook, so the file can survive after a successful download.
+    Instead, any backup zip/snapshot older than 10 minutes is swept away
+    at the START of the next backup request (a safety margin in case a
+    previous download is still genuinely in progress), which reliably
+    bounds disk usage without depending on server-specific behavior.
+    """
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    zip_filename = f"tutordb-backup-{timestamp}.zip"
+
+    backups_dir = os.path.join(DATA_DIR, "backups")
+    os.makedirs(backups_dir, exist_ok=True)
+
+    now = time.time()
+    for fname in os.listdir(backups_dir):
+        fpath = os.path.join(backups_dir, fname)
+        if os.path.isfile(fpath) and now - os.path.getmtime(fpath) > 600:
+            os.remove(fpath)
+
+    zip_path = os.path.join(backups_dir, zip_filename)
+    db_snapshot_path = os.path.join(backups_dir, f".snapshot-{timestamp}.db")
+
+    source_conn = sqlite3.connect(DB_PATH)
+    dest_conn = sqlite3.connect(db_snapshot_path)
+    with dest_conn:
+        source_conn.backup(dest_conn)
+    source_conn.close()
+    dest_conn.close()
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(db_snapshot_path, arcname="questions.db")
+        for root, _, files in os.walk(FILES_DIR):
+            for fname in files:
+                full_path = os.path.join(root, fname)
+                arcname = os.path.join("files", os.path.relpath(full_path, FILES_DIR))
+                zf.write(full_path, arcname=arcname)
+
+    os.remove(db_snapshot_path)
+
+    response = send_file(zip_path, as_attachment=True, download_name=zip_filename, mimetype="application/zip")
+
+    @response.call_on_close
+    def _cleanup():
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+
+    return response
 
 
 # ---------- Papers ----------
