@@ -687,33 +687,53 @@ function renderQuestionCard(q) {
       <div class="muted">${escapeHtml(q.topic)}${q.subtopic ? " · " + escapeHtml(q.subtopic) : ""}</div>
       <div>${q.tags.map(t => `<span class="tag-pill">${escapeHtml(t)}</span>`).join("")}</div>
       <div class="card-actions">
-        <button class="secondary" onclick="toggleDetails(${q.id})" id="details-btn-${q.id}">Details ▾</button>
+        <button class="secondary" onclick="openQuestionModal(${q.id})">Details</button>
         <button class="secondary" onclick="deleteQuestion(${q.id})">delete</button>
       </div>
-      <div class="q-detail" id="q-detail-${q.id}" style="display:none;"></div>
     </div>
   `;
 }
 
-function toggleDetails(id) {
-  const panel = document.getElementById(`q-detail-${id}`);
-  const btn = document.getElementById(`details-btn-${id}`);
-  const isOpen = panel.style.display !== "none";
-  if (isOpen) {
-    panel.style.display = "none";
-    panel.innerHTML = "";
-    btn.textContent = "Details ▾";
-    return;
-  }
-  panel.style.display = "block";
-  btn.textContent = "Details ▴";
-  renderDetailPanel(id);
+// ---------------------------------------------------------------
+// Full-screen question viewer (opened via "Details")
+// ---------------------------------------------------------------
+// modalIndex points into browseResultsCache -- the CURRENT filtered
+// list -- so prev/next arrows walk through whatever you've filtered to,
+// not the whole database.
+let modalIndex = -1;
+
+function openQuestionModal(id) {
+  const idx = browseResultsCache.findIndex(q => q.id === id);
+  if (idx === -1) return;
+  modalIndex = idx;
+  document.getElementById("question-modal").style.display = "flex";
+  document.body.style.overflow = "hidden";
+  renderModalQuestion();
 }
 
-function renderDetailPanel(id) {
-  const q = findCachedQuestion(id);
-  const panel = document.getElementById(`q-detail-${id}`);
+function closeQuestionModal() {
+  document.getElementById("question-modal").style.display = "none";
+  document.body.style.overflow = "";
+  modalIndex = -1;
+}
+
+function modalNav(delta) {
+  if (modalIndex === -1) return;
+  const next = modalIndex + delta;
+  if (next < 0 || next >= browseResultsCache.length) return;
+  modalIndex = next;
+  renderModalQuestion();
+}
+
+function renderModalQuestion() {
+  const q = browseResultsCache[modalIndex];
   if (!q) return;
+
+  document.getElementById("modal-position").textContent = `${modalIndex + 1} / ${browseResultsCache.length}`;
+  document.getElementById("modal-meta").textContent =
+    `${q.school} · ${q.subject}${q.topic ? " · " + q.topic : ""}${q.subtopic ? " · " + q.subtopic : ""}`;
+  document.getElementById("modal-prev").disabled = modalIndex === 0;
+  document.getElementById("modal-next").disabled = modalIndex === browseResultsCache.length - 1;
 
   const pages = q.question_images.map(img => `
     <div class="detail-page">
@@ -722,28 +742,33 @@ function renderDetailPanel(id) {
     </div>
   `).join("");
 
-  panel.innerHTML = `
+  document.getElementById("modal-body").innerHTML = `
+    <div class="modal-question-meta">
+      <span class="diff-tag ${q.difficulty}">${q.difficulty}</span>
+      ${q.question_number ? `<span class="muted">Question ${escapeHtml(q.question_number)}</span>` : ""}
+      ${q.tags.map(t => `<span class="tag-pill">${escapeHtml(t)}</span>`).join("")}
+    </div>
     ${pages || `<p class="muted">No crop image (page ${q.page_number || "?"})</p>`}
-    ${q.question_number ? `<div class="muted">Question ${escapeHtml(q.question_number)}</div>` : ""}
     ${q.notes ? `<div class="q-notes">${escapeHtml(q.notes)}</div>` : ""}
-    <div class="answer-section" id="answer-section-${q.id}"></div>
+    <div class="answer-section" id="modal-answer-section"></div>
   `;
-  renderAnswerSection(id);
+  renderAnswerSection();
 }
 
-function renderAnswerSection(id) {
-  const q = findCachedQuestion(id);
-  const el = document.getElementById(`answer-section-${id}`);
+function renderAnswerSection() {
+  const q = browseResultsCache[modalIndex];
+  const el = document.getElementById("modal-answer-section");
   if (!q || !el) return;
 
   const uploadPrompt = `
     <label class="answer-upload-label">
       ${q.answer_images.length ? "Add another solution page" : "Attach a worked solution (image, PDF, or Word doc)"}
-      <input type="file" multiple accept=".pdf,.doc,.docx,.png,.jpg,.jpeg" onchange="uploadAnswer(${id}, this.files)">
+      <input type="file" multiple accept=".pdf,.doc,.docx,.png,.jpg,.jpeg" onchange="uploadAnswer(${q.id}, this.files)">
     </label>
   `;
 
   if (q.answer_images.length > 0) {
+    const label = `Reveal answer${q.answer_images.length > 1 ? "s" : ""}`;
     const pages = q.answer_images.map(img => {
       const isImage = /\.(png|jpe?g)$/i.test(img.file_path);
       return `
@@ -753,18 +778,25 @@ function renderAnswerSection(id) {
             ? `<img class="detail-full-img" src="/files/${img.file_path}" alt="Worked solution">`
             : `<a href="/files/${img.file_path}" target="_blank">Open worked solution file</a>`
           }
-          <button type="button" class="secondary small" onclick="removeAnswerImage(${id}, ${img.id})">Remove this page</button>
+          <button type="button" class="secondary small" onclick="removeAnswerImage(${q.id}, ${img.id})">Remove this page</button>
         </div>
       `;
     }).join("");
 
     el.innerHTML = `
-      <button type="button" class="answer-toggle" onclick="toggleAnswer(${id})">Answer ▾</button>
-      <div class="answer-body" id="answer-body-${id}" style="display:none;">
+      <button type="button" class="answer-toggle" id="modal-reveal-answer">${label} ▾</button>
+      <div class="answer-body" id="modal-answer-body" style="display:none;">
         ${pages}
         ${uploadPrompt}
       </div>
     `;
+    document.getElementById("modal-reveal-answer").addEventListener("click", () => {
+      const body = document.getElementById("modal-answer-body");
+      const btn = document.getElementById("modal-reveal-answer");
+      const isOpen = body.style.display !== "none";
+      body.style.display = isOpen ? "none" : "block";
+      btn.textContent = isOpen ? `${label} ▾` : `Hide answer${q.answer_images.length > 1 ? "s" : ""} ▴`;
+    });
   } else {
     el.innerHTML = `
       <p class="hint">No worked solution linked yet.</p>
@@ -773,17 +805,11 @@ function renderAnswerSection(id) {
   }
 }
 
-function toggleAnswer(id) {
-  const body = document.getElementById(`answer-body-${id}`);
-  body.style.display = body.style.display === "none" ? "block" : "none";
-}
-
-// Accepts a FileList so you can attach a multi-page solution in one go --
-// each file becomes its own page/part linked to the question, uploaded
-// in the order they were selected.
+// Accepts a FileList so a multi-page solution can be attached in one go --
+// each file becomes its own page/part, uploaded in the order selected.
 async function uploadAnswer(id, files) {
   if (!files || files.length === 0) return;
-  const el = document.getElementById(`answer-section-${id}`);
+  const el = document.getElementById("modal-answer-section");
   el.innerHTML = `<p class="muted">Uploading...</p>`;
   try {
     let updated;
@@ -794,7 +820,7 @@ async function uploadAnswer(id, files) {
     }
     const idx = browseResultsCache.findIndex(q => q.id === id);
     if (idx !== -1) browseResultsCache[idx] = updated;
-    renderAnswerSection(id);
+    renderAnswerSection();
   } catch (err) {
     el.innerHTML = `<p class="status-msg err">Error: ${escapeHtml(err.message)}</p>`;
   }
@@ -805,7 +831,16 @@ async function removeAnswerImage(id, imageId) {
   const updated = await fetchJSON(`/api/questions/${id}/images/${imageId}`, { method: "DELETE" });
   const idx = browseResultsCache.findIndex(q => q.id === id);
   if (idx !== -1) browseResultsCache[idx] = updated;
-  renderAnswerSection(id);
+  renderAnswerSection();
+}
+
+async function deleteQuestionFromModal() {
+  const q = browseResultsCache[modalIndex];
+  if (!q) return;
+  if (!confirm("Delete this question?")) return;
+  await fetchJSON(`/api/questions/${q.id}`, { method: "DELETE" });
+  closeQuestionModal();
+  refreshBrowse();
 }
 
 async function deleteQuestion(id) {
@@ -814,14 +849,25 @@ async function deleteQuestion(id) {
   refreshBrowse();
 }
 
+document.getElementById("modal-close").addEventListener("click", closeQuestionModal);
+document.getElementById("modal-prev").addEventListener("click", () => modalNav(-1));
+document.getElementById("modal-next").addEventListener("click", () => modalNav(1));
+document.getElementById("modal-delete").addEventListener("click", deleteQuestionFromModal);
+
+document.addEventListener("keydown", (e) => {
+  if (document.getElementById("question-modal").style.display === "none") return;
+  if (e.key === "ArrowLeft") modalNav(-1);
+  if (e.key === "ArrowRight") modalNav(1);
+  if (e.key === "Escape") closeQuestionModal();
+});
+
 // ---------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------
 window.deletePaper = deletePaper;
 window.openChopById = openChopById;
 window.deleteQuestion = deleteQuestion;
-window.toggleDetails = toggleDetails;
-window.toggleAnswer = toggleAnswer;
+window.openQuestionModal = openQuestionModal;
 window.uploadAnswer = uploadAnswer;
 window.removeAnswerImage = removeAnswerImage;
 

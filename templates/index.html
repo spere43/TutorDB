@@ -191,6 +191,21 @@
 
 </main>
 
+<!-- ===================== FULL-SCREEN QUESTION VIEWER ===================== -->
+<div id="question-modal" class="question-modal" style="display:none;">
+  <div class="modal-topbar">
+    <button id="modal-close" class="secondary">&times; Close</button>
+    <div class="modal-topbar-info">
+      <span id="modal-position" class="muted"></span>
+      <span id="modal-meta"></span>
+    </div>
+    <button id="modal-delete" class="secondary">Delete</button>
+  </div>
+  <button id="modal-prev" class="modal-nav-arrow modal-nav-prev" aria-label="Previous question">&lsaquo;</button>
+  <button id="modal-next" class="modal-nav-arrow modal-nav-next" aria-label="Next question">&rsaquo;</button>
+  <div class="modal-body" id="modal-body"></div>
+</div>
+
 <script type="module" src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>
