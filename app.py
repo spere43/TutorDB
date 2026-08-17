@@ -1,9 +1,12 @@
-from flask import Flask, jsonify, request, send_from_directory, render_template
+from flask import Flask, jsonify, request, send_from_directory, render_template, send_file
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename
 from datetime import datetime
 import os
 import uuid
+import sqlite3
+import zipfile
+import time
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -24,6 +27,23 @@ FILES_DIR = os.path.join(DATA_DIR, "files")
 
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def normalize_question_number(raw):
+    """Keeps a leading "Q" if one's already there (case-normalized to
+    uppercase), otherwise adds one -- so "Q1", "q1", and "1" all end up
+    stored as "Q1" regardless of which way it was typed. Without this,
+    some questions end up stored with a "Q" and some without, and any
+    display code that adds its own "Q" prefix for the ones without ends
+    up double-prefixing the ones that already have it (e.g. "QQ1")."""
+    if raw is None:
+        return None
+    trimmed = raw.strip()
+    if not trimmed:
+        return None
+    if trimmed[0].lower() == "q":
+        return "Q" + trimmed[1:]
+    return "Q" + trimmed
 
 
 def save_upload(file_storage, subfolder=""):
@@ -85,31 +105,70 @@ class Question(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     paper_id = db.Column(db.Integer, db.ForeignKey("papers.id"), nullable=False)
     question_number = db.Column(db.String(20), nullable=True)  # e.g. "4" or "4b"
+    unit = db.Column(db.Integer, nullable=True)  # QCE unit: 1, 2, 3, or 4
     topic = db.Column(db.String(120), nullable=False)
     subtopic = db.Column(db.String(120), nullable=True)
     difficulty = db.Column(db.String(2), nullable=False)  # SF / CF / CU
-    crop_image_path = db.Column(db.String(300), nullable=True)  # chopped-out question image
-    page_number = db.Column(db.Integer, nullable=True)  # fallback if not cropped
+    page_number = db.Column(db.Integer, nullable=True)  # page the question STARTS on
     notes = db.Column(db.Text, nullable=True)
     date_added = db.Column(db.DateTime, default=datetime.utcnow)
 
     tags = db.relationship("Tag", secondary=question_tags, backref="questions")
 
+    # A question (or its worked solution) can span several pages/regions --
+    # each chopped box, or each manually-uploaded solution page, becomes one
+    # QuestionImage row here rather than a single fixed file path. `kind`
+    # separates the question's own images from its answer's.
+    images = db.relationship(
+        "QuestionImage", backref="question",
+        cascade="all, delete-orphan", order_by="QuestionImage.order_index",
+    )
+
     def to_dict(self):
+        q_images = [i.to_dict() for i in self.images if i.kind == "question"]
+        a_images = [i.to_dict() for i in self.images if i.kind == "answer"]
         return {
             "id": self.id,
             "paper_id": self.paper_id,
             "question_number": self.question_number,
+            "unit": self.unit,
             "topic": self.topic,
             "subtopic": self.subtopic,
             "difficulty": self.difficulty,
-            "crop_image_path": self.crop_image_path,
             "page_number": self.page_number,
             "notes": self.notes,
+            "question_images": q_images,
+            "answer_images": a_images,
+            "has_answer": len(a_images) > 0,
             "tags": [t.name for t in self.tags],
             "school": self.paper.school,
             "subject": self.paper.subject,
             "exam_type": self.paper.exam_type,
+        }
+
+
+class QuestionImage(db.Model):
+    """One page/region belonging to a question or its worked solution.
+    A question that spans multiple pages, or has a multi-page solution,
+    is just several rows here sharing a question_id, ordered by
+    order_index -- there's no separate "multi-page question" concept,
+    it falls out naturally from allowing more than one row per kind."""
+    __tablename__ = "question_images"
+    id = db.Column(db.Integer, primary_key=True)
+    question_id = db.Column(db.Integer, db.ForeignKey("questions.id"), nullable=False)
+    kind = db.Column(db.String(10), nullable=False)  # "question" or "answer"
+    page_number = db.Column(db.Integer, nullable=True)
+    file_path = db.Column(db.String(300), nullable=False)
+    order_index = db.Column(db.Integer, nullable=False, default=0)
+    date_added = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "page_number": self.page_number,
+            "file_path": self.file_path,
+            "order_index": self.order_index,
         }
 
 
@@ -128,6 +187,77 @@ def status():
         "paper_count": Paper.query.count(),
         "question_count": Question.query.count(),
     })
+
+
+@app.route("/api/backup", methods=["GET"])
+def download_backup():
+    """
+    Streams a single zip containing everything needed to run this exact
+    database on a different machine: a clean snapshot of the SQLite DB
+    plus every uploaded/cropped/answer file, in the same relative folder
+    layout the app already expects (questions.db at the zip root,
+    files/... underneath it, matching data/files/... here).
+
+    Restoring on a new machine is just: stop the app there, extract this
+    zip's contents into that machine's data/ folder (replacing whatever's
+    there), start the app -- no relinking needed, since every file_path
+    stored in the DB was already relative to data/files/ to begin with.
+
+    Uses SQLite's own backup API rather than copying the .db file's raw
+    bytes directly, so a write happening at the same moment as the
+    backup can't produce a torn/corrupted snapshot. Writes the zip to a
+    temp file on disk (not in memory) since this device's RAM is small
+    relative to a growing multi-GB question bank.
+
+    Cleanup: Flask's `call_on_close` hook for deleting the temp file
+    after sending is NOT reliable here -- send_file can hand the file off
+    to the WSGI server's own sendfile mechanism in a way that bypasses
+    that hook, so the file can survive after a successful download.
+    Instead, any backup zip/snapshot older than 10 minutes is swept away
+    at the START of the next backup request (a safety margin in case a
+    previous download is still genuinely in progress), which reliably
+    bounds disk usage without depending on server-specific behavior.
+    """
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    zip_filename = f"tutordb-backup-{timestamp}.zip"
+
+    backups_dir = os.path.join(DATA_DIR, "backups")
+    os.makedirs(backups_dir, exist_ok=True)
+
+    now = time.time()
+    for fname in os.listdir(backups_dir):
+        fpath = os.path.join(backups_dir, fname)
+        if os.path.isfile(fpath) and now - os.path.getmtime(fpath) > 600:
+            os.remove(fpath)
+
+    zip_path = os.path.join(backups_dir, zip_filename)
+    db_snapshot_path = os.path.join(backups_dir, f".snapshot-{timestamp}.db")
+
+    source_conn = sqlite3.connect(DB_PATH)
+    dest_conn = sqlite3.connect(db_snapshot_path)
+    with dest_conn:
+        source_conn.backup(dest_conn)
+    source_conn.close()
+    dest_conn.close()
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(db_snapshot_path, arcname="questions.db")
+        for root, _, files in os.walk(FILES_DIR):
+            for fname in files:
+                full_path = os.path.join(root, fname)
+                arcname = os.path.join("files", os.path.relpath(full_path, FILES_DIR))
+                zf.write(full_path, arcname=arcname)
+
+    os.remove(db_snapshot_path)
+
+    response = send_file(zip_path, as_attachment=True, download_name=zip_filename, mimetype="application/zip")
+
+    @response.call_on_close
+    def _cleanup():
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+
+    return response
 
 
 # ---------- Papers ----------
@@ -184,6 +314,76 @@ def create_paper():
     return jsonify(paper.to_dict()), 201
 
 
+# Placeholder values used for quick-add papers -- these aren't meant to be
+# meaningful, just a consistent, recognizable stand-in so quick-added
+# papers are easy to spot in listings (and easy to backfill with real
+# details later via the normal paper Edit form, if it's ever worth it).
+QUICK_ADD_SCHOOL = "Uncategorized"
+QUICK_ADD_EXAM_TYPE = "misc"
+QUICK_ADD_YEAR_LEVEL = 12
+
+
+@app.route("/api/papers/quick", methods=["POST"])
+def create_paper_quick():
+    """
+    Fast path for a one-off circulating question/screenshot that isn't
+    really "a paper" you're tracking -- skips school/year-level/exam-type
+    entirely (filled with placeholder values) so you can go straight from
+    screenshot to chopping. Expects multipart/form-data: subject, file.
+    Reusable indefinitely -- not a one-time/temporary thing.
+    """
+    subject = request.form.get("subject")
+    if not subject:
+        return jsonify({"error": "subject is required"}), 400
+
+    if "file" not in request.files or request.files["file"].filename == "":
+        return jsonify({"error": "file is required"}), 400
+
+    file = request.files["file"]
+    if not allowed_file(file.filename):
+        return jsonify({"error": "file type not allowed"}), 400
+
+    file_path = save_upload(file, subfolder=secure_filename(subject))
+
+    paper = Paper(
+        school=QUICK_ADD_SCHOOL,
+        subject=subject,
+        year_level=QUICK_ADD_YEAR_LEVEL,
+        exam_type=QUICK_ADD_EXAM_TYPE,
+        exam_year=None,
+        file_path=file_path,
+        solution_file_path=None,
+    )
+    db.session.add(paper)
+    db.session.commit()
+    return jsonify(paper.to_dict()), 201
+
+
+@app.route("/api/papers/<int:paper_id>", methods=["PATCH"])
+def update_paper(paper_id):
+    """Partial update for a paper's metadata (school, subject, year_level,
+    exam_type, exam_year) -- e.g. for correcting a typo without
+    re-uploading the file or touching any questions already chopped
+    from it. Unit lives on the QUESTION, not the paper -- see
+    PATCH /api/questions/<id> for that."""
+    paper = Paper.query.get_or_404(paper_id)
+    data = request.get_json() or {}
+
+    if "school" in data and data["school"]:
+        paper.school = data["school"]
+    if "subject" in data and data["subject"]:
+        paper.subject = data["subject"]
+    if "year_level" in data and data["year_level"]:
+        paper.year_level = int(data["year_level"])
+    if "exam_type" in data and data["exam_type"]:
+        paper.exam_type = data["exam_type"]
+    if "exam_year" in data:
+        paper.exam_year = int(data["exam_year"]) if data["exam_year"] else None
+
+    db.session.commit()
+    return jsonify(paper.to_dict())
+
+
 @app.route("/api/papers/<int:paper_id>", methods=["DELETE"])
 def delete_paper(paper_id):
     paper = Paper.query.get_or_404(paper_id)
@@ -199,36 +399,52 @@ def list_questions():
     """
     Filterable via query params, e.g.:
     /api/questions?subject=Methods&topic=Calculus&difficulty=CU&school=SchoolX&tag=appeared_on_mock
-    Multiple tag params are AND'd together (must have all listed tags).
+    Multiple "tag" params are AND'd together (must have all listed tags).
+    Multiple "exclude_tag" params are OR'd -- a question with ANY of the
+    excluded tags is dropped, regardless of whether it also matches "tag".
     """
     query = Question.query.join(Paper)
 
     subject = request.args.get("subject")
     school = request.args.get("school")
+    unit = request.args.get("unit")
     topic = request.args.get("topic")
+    subtopic = request.args.get("subtopic")
     difficulty = request.args.get("difficulty")
     exam_type = request.args.get("exam_type")
     year_level = request.args.get("year_level")
+    paper_id = request.args.get("paper_id")
     tags = request.args.getlist("tag")
+    exclude_tags = request.args.getlist("exclude_tag")
 
     if subject:
         query = query.filter(Paper.subject == subject)
     if school:
         query = query.filter(Paper.school == school)
+    if unit:
+        query = query.filter(Question.unit == int(unit))
     if topic:
         query = query.filter(Question.topic == topic)
+    if subtopic:
+        query = query.filter(Question.subtopic == subtopic)
     if difficulty:
         query = query.filter(Question.difficulty == difficulty.upper())
     if exam_type:
         query = query.filter(Paper.exam_type == exam_type)
     if year_level:
         query = query.filter(Paper.year_level == int(year_level))
+    if paper_id:
+        query = query.filter(Question.paper_id == int(paper_id))
 
     results = query.all()
 
     if tags:
         tag_set = set(tags)
         results = [q for q in results if tag_set.issubset({t.name for t in q.tags})]
+
+    if exclude_tags:
+        exclude_set = set(exclude_tags)
+        results = [q for q in results if not exclude_set.intersection({t.name for t in q.tags})]
 
     return jsonify([q.to_dict() for q in results])
 
@@ -240,6 +456,7 @@ def create_question():
     {
       "paper_id": 1,
       "question_number": "4b",
+      "unit": 3,
       "topic": "Calculus",
       "subtopic": "Related rates",
       "difficulty": "CU",
@@ -260,9 +477,14 @@ def create_question():
     if data["difficulty"].upper() not in {"SF", "CF", "CU"}:
         return jsonify({"error": "difficulty must be SF, CF, or CU"}), 400
 
+    unit = data.get("unit")
+    if unit is not None and int(unit) not in {1, 2, 3, 4}:
+        return jsonify({"error": "unit must be 1, 2, 3, or 4"}), 400
+
     question = Question(
         paper_id=paper.id,
-        question_number=data.get("question_number"),
+        question_number=normalize_question_number(data.get("question_number")),
+        unit=int(unit) if unit is not None else None,
         topic=data["topic"],
         subtopic=data.get("subtopic"),
         difficulty=data["difficulty"].upper(),
@@ -283,20 +505,40 @@ def create_question():
     return jsonify(question.to_dict()), 201
 
 
+@app.route("/api/questions/<int:question_id>", methods=["GET"])
+def get_question(question_id):
+    """Fetches full detail for one question. The frontend's Browse tab
+    already has this data client-side after listing, but this exists so
+    the question detail is directly linkable/fetchable (and so hitting the
+    URL doesn't 405, which is what "details" was doing before this route
+    existed -- only PATCH/DELETE were registered for this path)."""
+    question = Question.query.get_or_404(question_id)
+    return jsonify(question.to_dict())
+
+
 @app.route("/api/questions/<int:question_id>", methods=["PATCH"])
 def update_question(question_id):
     """Partial update — send only the fields you want to change."""
     question = Question.query.get_or_404(question_id)
     data = request.get_json() or {}
 
-    for field in ["question_number", "topic", "subtopic", "notes", "page_number"]:
+    for field in ["topic", "subtopic", "notes", "page_number"]:
         if field in data:
             setattr(question, field, data[field])
+
+    if "question_number" in data:
+        question.question_number = normalize_question_number(data["question_number"])
 
     if "difficulty" in data:
         if data["difficulty"].upper() not in {"SF", "CF", "CU"}:
             return jsonify({"error": "difficulty must be SF, CF, or CU"}), 400
         question.difficulty = data["difficulty"].upper()
+
+    if "unit" in data:
+        unit = data["unit"]
+        if unit is not None and int(unit) not in {1, 2, 3, 4}:
+            return jsonify({"error": "unit must be 1, 2, 3, or 4"}), 400
+        question.unit = int(unit) if unit is not None else None
 
     if "tags" in data:
         question.tags = []
@@ -321,14 +563,85 @@ def delete_question(question_id):
 
 @app.route("/api/questions/<int:question_id>/crop", methods=["POST"])
 def upload_crop(question_id):
-    """Upload a cropped image of this question (from the chopping UI)."""
+    """Adds ONE more page/region to this question. Call it again for a
+    question that continues on another page or in another region -- each
+    call just appends another part in order, rather than replacing
+    anything, so a multi-page question is just several calls."""
     question = Question.query.get_or_404(question_id)
     if "image" not in request.files or request.files["image"].filename == "":
         return jsonify({"error": "image file is required"}), 400
 
     image = request.files["image"]
+    page_number = request.form.get("page_number", type=int)
     crop_path = save_upload(image, subfolder=os.path.join("crops", secure_filename(question.paper.subject)))
-    question.crop_image_path = crop_path
+
+    next_order = db.session.query(db.func.coalesce(db.func.max(QuestionImage.order_index), -1)) \
+        .filter_by(question_id=question.id, kind="question").scalar() + 1
+    part = QuestionImage(question_id=question.id, kind="question", page_number=page_number,
+                          file_path=crop_path, order_index=next_order)
+    db.session.add(part)
+    db.session.commit()
+    return jsonify(question.to_dict())
+
+
+@app.route("/api/questions/<int:question_id>/answer", methods=["POST"])
+def upload_answer(question_id):
+    """
+    Adds ONE more page/part to this question's worked solution -- same
+    endpoint whether it comes from chopping the solutions PDF alongside
+    the paper, or from uploading a worked solution written up later.
+    Appends rather than replaces, so a multi-page solution (or one you
+    add to over time as you write up more of it) is just several calls.
+    Expects multipart/form-data with a "file" field and optional
+    "page_number".
+    """
+    question = Question.query.get_or_404(question_id)
+    if "file" not in request.files or request.files["file"].filename == "":
+        return jsonify({"error": "file is required"}), 400
+
+    file = request.files["file"]
+    if not allowed_file(file.filename):
+        return jsonify({"error": "file type not allowed"}), 400
+
+    page_number = request.form.get("page_number", type=int)
+    answer_path = save_upload(file, subfolder=os.path.join("answers", secure_filename(question.paper.subject)))
+
+    next_order = db.session.query(db.func.coalesce(db.func.max(QuestionImage.order_index), -1)) \
+        .filter_by(question_id=question.id, kind="answer").scalar() + 1
+    part = QuestionImage(question_id=question.id, kind="answer", page_number=page_number,
+                          file_path=answer_path, order_index=next_order)
+    db.session.add(part)
+    db.session.commit()
+    return jsonify(question.to_dict())
+
+
+@app.route("/api/questions/<int:question_id>/answer", methods=["DELETE"])
+def delete_all_answers(question_id):
+    """Removes ALL worked-solution parts linked to this question (e.g. to
+    start over with a fresh upload). To remove just one page of a
+    multi-page solution instead, use
+    DELETE /api/questions/<id>/images/<image_id>."""
+    question = Question.query.get_or_404(question_id)
+    for img in [i for i in question.images if i.kind == "answer"]:
+        old_path = os.path.join(FILES_DIR, img.file_path)
+        if os.path.exists(old_path):
+            os.remove(old_path)
+        db.session.delete(img)
+    db.session.commit()
+    return jsonify(question.to_dict())
+
+
+@app.route("/api/questions/<int:question_id>/images/<int:image_id>", methods=["DELETE"])
+def delete_question_image(question_id, image_id):
+    """Removes one specific page/part (a question crop or one answer
+    page) without touching the rest -- what you want for a multi-page
+    question/solution where only one page needs redoing."""
+    question = Question.query.get_or_404(question_id)
+    img = QuestionImage.query.filter_by(id=image_id, question_id=question.id).first_or_404()
+    old_path = os.path.join(FILES_DIR, img.file_path)
+    if os.path.exists(old_path):
+        os.remove(old_path)
+    db.session.delete(img)
     db.session.commit()
     return jsonify(question.to_dict())
 
@@ -341,15 +654,39 @@ def list_tags():
     return jsonify([t.name for t in tags])
 
 
-# ---------- Topics (distinct list, useful for populating dropdowns) ----------
+# ---------- Topics / subtopics (distinct lists, scoped for cascading dropdowns) ----------
 
 @app.route("/api/topics", methods=["GET"])
 def list_topics():
+    """Topics are scoped to a subject+unit rather than global, so the
+    dropdown only ever shows topics that actually belong to what you've
+    selected (e.g. Physics Unit 4 topics, not every topic in the DB)."""
     subject = request.args.get("subject")
+    unit = request.args.get("unit")
     query = db.session.query(Question.topic).join(Paper).distinct()
     if subject:
         query = query.filter(Paper.subject == subject)
+    if unit:
+        query = query.filter(Question.unit == int(unit))
     return jsonify(sorted([t[0] for t in query.all()]))
+
+
+@app.route("/api/subtopics", methods=["GET"])
+def list_subtopics():
+    """Subtopics scoped to subject+unit+topic (e.g. Bernoulli/Binomial
+    under Maths Methods Unit 3's "Discrete random variables" topic)."""
+    subject = request.args.get("subject")
+    unit = request.args.get("unit")
+    topic = request.args.get("topic")
+    query = db.session.query(Question.subtopic).join(Paper) \
+        .filter(Question.subtopic.isnot(None)).distinct()
+    if subject:
+        query = query.filter(Paper.subject == subject)
+    if unit:
+        query = query.filter(Question.unit == int(unit))
+    if topic:
+        query = query.filter(Question.topic == topic)
+    return jsonify(sorted([s[0] for s in query.all()]))
 
 
 @app.route("/api/subjects", methods=["GET"])
@@ -374,4 +711,77 @@ def serve_file(filepath):
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
+        # db.create_all() only creates tables that don't exist yet -- it
+        # won't add new columns to a table that's already on disk, or move
+        # data for you. Since this project isn't using Flask-Migrate/Alembic,
+        # any schema change needs a small manual migration here too.
+        inspector = db.inspect(db.engine)
+        existing_cols = {c["name"] for c in inspector.get_columns("questions")}
+        if "answer_file_path" not in existing_cols:
+            with db.engine.begin() as conn:
+                conn.execute(db.text("ALTER TABLE questions ADD COLUMN answer_file_path VARCHAR(300)"))
+            existing_cols.add("answer_file_path")
+
+        if "unit" not in existing_cols:
+            with db.engine.begin() as conn:
+                conn.execute(db.text("ALTER TABLE questions ADD COLUMN unit INTEGER"))
+            existing_cols.add("unit")
+            # Existing questions (e.g. from before this field existed, or
+            # chopped under the old paper-level "unit" that's since been
+            # removed) are left with unit=NULL -- there's no reliable way
+            # to infer it automatically, especially with old-vs-new
+            # syllabus content having moved between units. Use "Edit" on
+            # a question in the full-screen viewer to set it retroactively,
+            # question by question, without re-uploading anything.
+
+        # Multi-page support: question/answer images now live in their own
+        # question_images table (one question can have several page crops)
+        # instead of a single crop_image_path / answer_file_path column. If
+        # this is an existing DB with old-style single-file questions
+        # (e.g. from your earlier workflow test), copy those in as each
+        # question's first part so nothing gets orphaned by the change.
+        if "crop_image_path" in existing_cols or "answer_file_path" in existing_cols:
+            with db.engine.begin() as conn:
+                cols = ", ".join(c for c in ["id", "crop_image_path", "answer_file_path"] if c in existing_cols or c == "id")
+                rows = conn.execute(db.text(f"SELECT {cols} FROM questions")).fetchall()
+                for row in rows:
+                    row = row._mapping
+                    qid = row["id"]
+                    crop_path = row.get("crop_image_path")
+                    answer_path = row.get("answer_file_path")
+                    if crop_path:
+                        exists = conn.execute(db.text(
+                            "SELECT 1 FROM question_images WHERE question_id=:qid AND kind='question' LIMIT 1"
+                        ), {"qid": qid}).fetchone()
+                        if not exists:
+                            conn.execute(db.text(
+                                "INSERT INTO question_images (question_id, kind, file_path, order_index, date_added) "
+                                "VALUES (:qid, 'question', :fp, 0, :now)"
+                            ), {"qid": qid, "fp": crop_path, "now": datetime.utcnow()})
+                    if answer_path:
+                        exists = conn.execute(db.text(
+                            "SELECT 1 FROM question_images WHERE question_id=:qid AND kind='answer' LIMIT 1"
+                        ), {"qid": qid}).fetchone()
+                        if not exists:
+                            conn.execute(db.text(
+                                "INSERT INTO question_images (question_id, kind, file_path, order_index, date_added) "
+                                "VALUES (:qid, 'answer', :fp, 0, :now)"
+                            ), {"qid": qid, "fp": answer_path, "now": datetime.utcnow()})
+
+        # Normalize any existing question_number values to always include a
+        # leading "Q", matching what new saves now produce. Some earlier
+        # chopping already typed "Q1" manually, some just typed "1" -- left
+        # inconsistent, any display code adding its own "Q" would double up
+        # on the ones that already had one (showing "QQ1"). This is a plain
+        # data normalization (not a schema change), safe to re-run every
+        # startup since it's a no-op once everything's already normalized.
+        to_fix = Question.query.filter(Question.question_number.isnot(None)).all()
+        changed = False
+        for q in to_fix:
+            normalized = normalize_question_number(q.question_number)
+            if normalized != q.question_number:
+                q.question_number = normalized
+                changed = True
+        if changed:
+            db.session.commit()
     app.run(host="0.0.0.0", port=5000, debug=True)

@@ -14,6 +14,7 @@
     <button class="tab-btn active" data-tab="browse">Browse</button>
     <button class="tab-btn" data-tab="add">Add Paper</button>
     <button class="tab-btn" data-tab="chop">Chop</button>
+    <button class="tab-btn" data-tab="settings">Settings</button>
   </nav>
 </header>
 
@@ -23,8 +24,10 @@
   <section id="tab-browse" class="tab-panel active">
     <div class="filter-bar">
       <select id="f-subject"><option value="">Subject: any</option></select>
+      <select id="f-unit" disabled><option value="">Unit: pick a subject first</option></select>
+      <select id="f-topic" disabled><option value="">Topic: pick a unit first</option></select>
+      <select id="f-subtopic" disabled><option value="">Subtopic: pick a topic first</option></select>
       <select id="f-school"><option value="">School: any</option></select>
-      <select id="f-topic"><option value="">Topic: any</option></select>
       <select id="f-difficulty">
         <option value="">Difficulty: any</option>
         <option value="SF">SF</option>
@@ -37,7 +40,8 @@
         <option value="mock">Mock</option>
         <option value="QCAA">QCAA-style</option>
       </select>
-      <input id="f-tags" type="text" placeholder="tags (comma separated)">
+      <input id="f-tags" type="text" placeholder="include tags (comma separated)">
+      <input id="f-tags-exclude" type="text" placeholder="exclude tags (comma separated)">
       <button id="apply-filters">Filter</button>
       <button id="clear-filters" class="secondary">Clear</button>
     </div>
@@ -91,7 +95,23 @@
     </form>
     <div id="add-paper-status" class="status-msg"></div>
 
+    <div class="quick-add-box">
+      <h3>Quick add a circulating question/screenshot</h3>
+      <p class="hint">For a one-off question that isn't from a specific paper you're tracking -- skips the usual details and goes straight to chopping.</p>
+      <form id="quick-add-form">
+        <label>Subject
+          <input list="subject-list" id="qa-subject" required>
+        </label>
+        <label>Image or file
+          <input type="file" id="qa-file" accept=".pdf,.doc,.docx,.png,.jpg,.jpeg" required>
+        </label>
+        <button type="submit">Add &amp; start chopping</button>
+      </form>
+      <div id="quick-add-status" class="status-msg"></div>
+    </div>
+
     <h2>Existing papers</h2>
+    <select id="papers-subject-filter"><option value="">All subjects</option></select>
     <div id="papers-list"></div>
   </section>
 
@@ -99,6 +119,7 @@
   <section id="tab-chop" class="tab-panel">
     <div id="chop-picker">
       <h2>Choose a paper to chop</h2>
+      <select id="chop-subject-filter"><option value="">All subjects</option></select>
       <div id="chop-papers-list"></div>
     </div>
 
@@ -111,22 +132,47 @@
           <span id="page-indicator">Page 1 / 1</span>
           <button id="next-page">&gt;</button>
         </div>
+        <div class="zoom-controls">
+          <button id="zoom-out" aria-label="Zoom out">&minus;</button>
+          <span class="zoom-input-wrap">
+            <input type="number" id="zoom-input" min="30" max="400" step="5" value="100" aria-label="Zoom percentage">%
+          </span>
+          <button id="zoom-in" aria-label="Zoom in">+</button>
+          <button id="zoom-fit" class="secondary">Fit</button>
+        </div>
+      </div>
+
+      <div class="chop-mode-switch" id="chop-mode-switch" style="display:none;">
+        <button type="button" class="mode-btn active" data-mode="questions">Chop Questions</button>
+        <button type="button" class="mode-btn" data-mode="answers">Chop Answers</button>
       </div>
 
       <div class="chop-main">
-        <div class="pdf-canvas-wrap">
+        <div class="pdf-canvas-wrap" id="pdf-canvas-wrap">
           <canvas id="pdf-canvas"></canvas>
           <canvas id="overlay-canvas"></canvas>
         </div>
 
-        <div class="chop-form">
-          <p class="hint">Draw a box around a question on the page (click/tap and drag).</p>
-          <div id="crop-preview-wrap" style="display:none;">
-            <img id="crop-preview" alt="cropped question preview">
+        <div class="chop-form" id="chop-form-questions">
+          <p class="hint">Draw a box around a question on the page (click/tap and drag). If it continues on another page, draw that too and add it as another part before saving.</p>
+          <div id="crop-preview-wrap" class="crop-preview-wrap-box" style="display:none;">
+            <img id="crop-preview" class="crop-preview-img" alt="cropped question preview">
           </div>
+          <button type="button" id="add-question-part" class="secondary small" disabled>+ Add another page/part to this question</button>
+          <div id="question-staged-parts" class="staged-parts-strip"></div>
 
           <label>Question number
             <input type="text" id="q-number" placeholder="e.g. 4b">
+          </label>
+
+          <label>Unit
+            <select id="q-unit" required>
+              <option value="">Choose a unit</option>
+              <option value="1">Unit 1</option>
+              <option value="2">Unit 2</option>
+              <option value="3">Unit 3</option>
+              <option value="4">Unit 4</option>
+            </select>
           </label>
 
           <label>Topic
@@ -135,7 +181,8 @@
           </label>
 
           <label>Subtopic (optional)
-            <input type="text" id="q-subtopic">
+            <input type="text" id="q-subtopic" list="subtopic-list">
+            <datalist id="subtopic-list"></datalist>
           </label>
 
           <label>Difficulty</label>
@@ -156,11 +203,59 @@
           <button id="save-question" disabled>Save question</button>
           <div id="chop-status" class="status-msg"></div>
         </div>
+
+        <div class="chop-form" id="chop-form-answers" style="display:none;">
+          <p class="hint">Draw a box around a worked solution, then pick which question it answers. If the solution spans several pages, draw each and add as another part before saving.</p>
+          <div id="answer-crop-preview-wrap" class="crop-preview-wrap-box" style="display:none;">
+            <img id="answer-crop-preview" class="crop-preview-img" alt="cropped answer preview">
+          </div>
+          <button type="button" id="add-answer-part" class="secondary small" disabled>+ Add another page/part to this answer</button>
+          <div id="answer-staged-parts" class="staged-parts-strip"></div>
+
+          <label>Link to question
+            <select id="answer-q-select"></select>
+          </label>
+
+          <button id="save-answer" disabled>Save answer</button>
+          <div id="answer-chop-status" class="status-msg"></div>
+        </div>
       </div>
     </div>
   </section>
 
+  <!-- ===================== SETTINGS TAB ===================== -->
+  <section id="tab-settings" class="tab-panel">
+    <h2>Settings</h2>
+
+    <div class="settings-box">
+      <h3>Backup</h3>
+      <p class="hint">
+        Downloads everything -- the database and every uploaded, cropped, and answer file -- as one zip.
+        To restore on another machine: stop the app there, extract this zip's contents into that
+        machine's <code>data/</code> folder (replacing what's there), then start the app again.
+        No relinking needed -- file paths were already relative to begin with.
+      </p>
+      <a href="/api/backup" class="button-link" download>Download backup</a>
+    </div>
+  </section>
+
 </main>
+
+<!-- ===================== FULL-SCREEN QUESTION VIEWER ===================== -->
+<div id="question-modal" class="question-modal" style="display:none;">
+  <div class="modal-topbar">
+    <button id="modal-close" class="secondary">&times; Close</button>
+    <div class="modal-topbar-info">
+      <span id="modal-position" class="muted"></span>
+      <span id="modal-meta"></span>
+    </div>
+    <button id="modal-delete" class="secondary">Delete</button>
+    <button id="modal-edit" class="secondary">Edit</button>
+  </div>
+  <button id="modal-prev" class="modal-nav-arrow modal-nav-prev" aria-label="Previous question">&lsaquo;</button>
+  <button id="modal-next" class="modal-nav-arrow modal-nav-next" aria-label="Next question">&rsaquo;</button>
+  <div class="modal-body" id="modal-body"></div>
+</div>
 
 <script type="module" src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
