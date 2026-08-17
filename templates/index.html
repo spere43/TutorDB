@@ -14,6 +14,7 @@
     <button class="tab-btn active" data-tab="browse">Browse</button>
     <button class="tab-btn" data-tab="add">Add Paper</button>
     <button class="tab-btn" data-tab="chop">Chop</button>
+    <button class="tab-btn" data-tab="classify" id="classify-tab-btn">Classify</button>
     <button class="tab-btn" data-tab="settings">Settings</button>
   </nav>
 </header>
@@ -28,6 +29,7 @@
       <select id="f-topic" disabled><option value="">Topic: pick a unit first</option></select>
       <select id="f-subtopic" disabled><option value="">Subtopic: pick a topic first</option></select>
       <select id="f-school"><option value="">School: any</option></select>
+      <select id="f-paper" disabled><option value="">Paper: pick a subject first</option></select>
       <select id="f-difficulty">
         <option value="">Difficulty: any</option>
         <option value="SF">SF</option>
@@ -48,6 +50,7 @@
 
     <div id="results-count" class="muted"></div>
     <div id="results-grid" class="results-grid"></div>
+    <button id="results-load-more" class="secondary" style="display:none;">Load more</button>
   </section>
 
   <!-- ===================== ADD PAPER TAB ===================== -->
@@ -129,7 +132,9 @@
         <span id="chop-paper-title" class="muted"></span>
         <div class="page-nav">
           <button id="prev-page">&lt;</button>
-          <span id="page-indicator">Page 1 / 1</span>
+          <span class="page-input-wrap">
+            Page <input type="number" id="page-input" min="1" value="1" aria-label="Page number"> / <span id="page-total">1</span>
+          </span>
           <button id="next-page">&gt;</button>
         </div>
         <div class="zoom-controls">
@@ -201,6 +206,7 @@
           </label>
 
           <button id="save-question" disabled>Save question</button>
+          <button type="button" id="quick-save-question" class="secondary" disabled>Quick save (classify later)</button>
           <div id="chop-status" class="status-msg"></div>
         </div>
 
@@ -221,6 +227,17 @@
         </div>
       </div>
     </div>
+  </section>
+
+  <!-- ===================== CLASSIFY TAB ===================== -->
+  <section id="tab-classify" class="tab-panel">
+    <div class="classify-toolbar">
+      <h2 style="margin:0;">Classify</h2>
+      <select id="classify-subject-filter"><option value="">All subjects</option></select>
+      <span id="classify-remaining" class="muted"></span>
+    </div>
+    <p class="hint">Questions chopped with "Quick save (classify later)" on the Chop tab show up here, one at a time, so you can sort through a whole backlog quickly without re-opening a picker each time.</p>
+    <div id="classify-area"></div>
   </section>
 
   <!-- ===================== SETTINGS TAB ===================== -->

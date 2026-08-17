@@ -385,6 +385,80 @@ button.small {
   color: var(--muted);
 }
 
+.page-input-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+#page-input {
+  width: 44px;
+  text-align: right;
+  padding: 4px 4px;
+  font-size: 13px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+}
+/* hide the spinner arrows -- same reasoning as #zoom-input: this is a
+   field you'll mostly type a page number into directly */
+#page-input::-webkit-outer-spin-button,
+#page-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+#page-input { -moz-appearance: textfield; }
+
+#results-load-more {
+  display: block;
+  margin: 16px auto 0;
+}
+
+/* Classify tab -- image(s) beside a compact classification form, one
+   question at a time. Stacks vertically on narrow screens (iPad
+   portrait / iPhone) same as the chop layout does. */
+.classify-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.classify-layout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.classify-images {
+  flex: 1 1 360px;
+  min-width: 260px;
+}
+.classify-form {
+  flex: 1 1 320px;
+  min-width: 260px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+.classify-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.unclassified-badge {
+  display: inline-block;
+  font-size: 11px;
+  background: var(--panel-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 7px;
+  margin-left: 6px;
+}
+
 #zoom-input {
   width: 48px;
   text-align: right;
