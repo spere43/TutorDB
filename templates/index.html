@@ -25,17 +25,8 @@
   <section id="tab-browse" class="tab-panel active">
     <div class="filter-bar">
       <select id="f-subject"><option value="">Subject: any</option></select>
-      <select id="f-unit" disabled><option value="">Unit: pick a subject first</option></select>
-      <select id="f-topic" disabled><option value="">Topic: pick a unit first</option></select>
-      <select id="f-subtopic" disabled><option value="">Subtopic: pick a topic first</option></select>
       <select id="f-school"><option value="">School: any</option></select>
       <select id="f-paper" disabled><option value="">Paper: pick a subject first</option></select>
-      <select id="f-difficulty">
-        <option value="">Difficulty: any</option>
-        <option value="SF">SF</option>
-        <option value="CF">CF</option>
-        <option value="CU">CU</option>
-      </select>
       <select id="f-exam-type">
         <option value="">Exam type: any</option>
         <option value="internal">Internal</option>
@@ -46,6 +37,25 @@
       <input id="f-tags-exclude" type="text" placeholder="exclude tags (comma separated)">
       <button id="apply-filters">Filter</button>
       <button id="clear-filters" class="secondary">Clear</button>
+    </div>
+
+    <div class="filter-chips-block">
+      <div class="chip-group">
+        <span class="chip-group-label">Unit</span>
+        <div id="f-unit-chips" class="chip-row"></div>
+      </div>
+      <div class="chip-group">
+        <span class="chip-group-label">Difficulty</span>
+        <div id="f-difficulty-chips" class="chip-row"></div>
+      </div>
+      <div class="chip-group">
+        <span class="chip-group-label">Topic</span>
+        <div id="f-topic-chips" class="chip-row"></div>
+      </div>
+      <div class="chip-group">
+        <span class="chip-group-label">Subtopic</span>
+        <div id="f-subtopic-chips" class="chip-row"></div>
+      </div>
     </div>
 
     <div id="results-count" class="muted"></div>
@@ -199,6 +209,7 @@
 
           <label>Tags (comma separated)
             <input type="text" id="q-tags" placeholder="e.g. unique, appeared_on_mock">
+            <div id="q-quick-tags"></div>
           </label>
 
           <label>Notes (optional)

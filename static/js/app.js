@@ -49,6 +49,31 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// Your existing tags "Tech free" / "Tech active" / "MCQ" -- pressing one
+// of these just types that same text into the comma-separated tag field,
+// so a button-added tag and a hand-typed one are the exact same string
+// in the database. Won't duplicate if it's already present, and leaves
+// the cursor in the field so you can keep typing more tags after it.
+const QUICK_TAGS = ["Tech free", "Tech active", "MCQ"];
+
+function quickTagButtonsHtml(inputId) {
+  return `<div class="quick-tag-row">${
+    QUICK_TAGS.map(t => `<button type="button" class="quick-tag-btn" data-target="${inputId}" data-tag="${escapeHtml(t)}">+ ${escapeHtml(t)}</button>`).join("")
+  }</div>`;
+}
+
+function wireQuickTagButtons(containerEl) {
+  containerEl.querySelectorAll(".quick-tag-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const input = document.getElementById(btn.dataset.target);
+      const current = input.value.split(",").map(t => t.trim()).filter(Boolean);
+      if (!current.includes(btn.dataset.tag)) current.push(btn.dataset.tag);
+      input.value = current.join(", ");
+      input.focus();
+    });
+  });
+}
+
 async function loadDropdownData() {
   // Topics/subtopics are intentionally NOT loaded here -- they're scoped
   // to a subject+unit (and subtopics further to a topic), so they're
@@ -67,10 +92,16 @@ async function loadDropdownData() {
 
 // ---------------------------------------------------------------
 // Browse filter cascade: Subject -> Unit -> Topic -> Subtopic
-// Each level is disabled with a placeholder until the level above it
-// has a value, and picking a new value at any level clears/disables
-// everything below it (since a subtopic list, say, is meaningless
-// once the topic it belonged to has changed).
+// ---------------------------------------------------------------
+// BROWSE FILTER CASCADE -- Subject anchors everything (single-select,
+// unchanged); Unit/Topic/Subtopic below it are toggle-chip multi-select
+// rather than dropdowns. Cascade is "loose": with nothing picked at a
+// level, the level below shows everything for the current subject
+// (not nothing) -- so e.g. leaving Unit unpicked still lets you browse
+// every topic for that subject, rather than forcing a unit choice
+// first. Subject is still required before Unit/Topic/Subtopic show
+// anything, since without it the topic list would be every topic
+// across every subject at once.
 // ---------------------------------------------------------------
 function setSelectState(id, enabled, placeholder, options) {
   const el = document.getElementById(id);
@@ -84,59 +115,107 @@ function setSelectState(id, enabled, placeholder, options) {
 }
 
 const UNIT_OPTIONS = ["1", "2", "3", "4"];
+const DIFFICULTY_OPTIONS = ["SF", "CF", "CU"];
 
-function resetUnitDown() {
-  setSelectState("f-unit", false, "Unit: pick a subject first");
-  resetTopicDown();
-}
-function resetTopicDown() {
-  setSelectState("f-topic", false, "Topic: pick a unit first");
-  resetSubtopicDown();
-}
-function resetSubtopicDown() {
-  setSelectState("f-subtopic", false, "Subtopic: pick a topic first");
-}
+let browseSelectedUnits = [];
+let browseSelectedTopics = [];
+let browseSelectedSubtopics = [];
+let browseSelectedDifficulties = [];
 
-document.getElementById("f-subject").addEventListener("change", () => {
-  const subject = document.getElementById("f-subject").value;
-  if (subject) {
-    setSelectState("f-unit", true, "Unit: any", UNIT_OPTIONS.map(u => `Unit ${u}`));
-    // store the raw unit numbers as values via a second pass, since the
-    // label ("Unit 3") and the filter value ("3") differ here
-    const unitEl = document.getElementById("f-unit");
-    unitEl.innerHTML = `<option value="">Unit: any</option>` +
-      UNIT_OPTIONS.map(u => `<option value="${u}">Unit ${u}</option>`).join("");
-  } else {
-    resetUnitDown();
+function renderChipRow(containerId, options, selectedArr, onToggle, emptyHint) {
+  const el = document.getElementById(containerId);
+  if (options.length === 0) {
+    el.innerHTML = emptyHint ? `<span class="muted">${emptyHint}</span>` : "";
+    return;
   }
-  resetTopicDown();
+  el.innerHTML = options.map(opt => `
+    <button type="button" class="chip-btn${selectedArr.includes(opt) ? " selected" : ""}" data-value="${escapeHtml(opt)}">${escapeHtml(opt)}</button>
+  `).join("");
+  el.querySelectorAll(".chip-btn").forEach(btn => {
+    btn.addEventListener("click", () => onToggle(btn.dataset.value));
+  });
+}
+
+function renderUnitChips() {
+  renderChipRow("f-unit-chips", UNIT_OPTIONS, browseSelectedUnits, toggleUnit);
+}
+function renderDifficultyChips() {
+  renderChipRow("f-difficulty-chips", DIFFICULTY_OPTIONS, browseSelectedDifficulties, toggleDifficulty);
+}
+
+async function refreshTopicChips() {
+  const subject = document.getElementById("f-subject").value;
+  if (!subject) {
+    renderChipRow("f-topic-chips", [], browseSelectedTopics, toggleTopic, "Pick a subject first");
+    return;
+  }
+  const params = new URLSearchParams({ subject });
+  browseSelectedUnits.forEach(u => params.append("unit", u));
+  const topics = await fetchJSON("/api/topics?" + params.toString());
+  // Drop any selected topic that no longer applies (e.g. unit selection
+  // narrowed the list) so stale filters can't silently keep applying.
+  browseSelectedTopics = browseSelectedTopics.filter(t => topics.includes(t));
+  renderChipRow("f-topic-chips", topics, browseSelectedTopics, toggleTopic,
+    topics.length === 0 ? "No topics chopped yet for this scope" : null);
+}
+
+async function refreshSubtopicChips() {
+  const subject = document.getElementById("f-subject").value;
+  if (!subject) {
+    renderChipRow("f-subtopic-chips", [], browseSelectedSubtopics, toggleSubtopic, "Pick a subject first");
+    return;
+  }
+  const params = new URLSearchParams({ subject });
+  browseSelectedUnits.forEach(u => params.append("unit", u));
+  browseSelectedTopics.forEach(t => params.append("topic", t));
+  const subtopics = await fetchJSON("/api/subtopics?" + params.toString());
+  browseSelectedSubtopics = browseSelectedSubtopics.filter(s => subtopics.includes(s));
+  renderChipRow("f-subtopic-chips", subtopics, browseSelectedSubtopics, toggleSubtopic,
+    subtopics.length === 0 ? "No subtopics set for this scope" : null);
+}
+
+function toggleArrValue(arr, value) {
+  const i = arr.indexOf(value);
+  if (i === -1) arr.push(value); else arr.splice(i, 1);
+}
+
+function toggleUnit(value) {
+  toggleArrValue(browseSelectedUnits, value);
+  renderUnitChips();
+  refreshTopicChips().then(refreshSubtopicChips);
+  refreshBrowse(true);
+}
+function toggleTopic(value) {
+  toggleArrValue(browseSelectedTopics, value);
+  refreshTopicChips();
+  refreshSubtopicChips();
+  refreshBrowse(true);
+}
+function toggleSubtopic(value) {
+  toggleArrValue(browseSelectedSubtopics, value);
+  refreshSubtopicChips();
+  refreshBrowse(true);
+}
+function toggleDifficulty(value) {
+  toggleArrValue(browseSelectedDifficulties, value);
+  renderDifficultyChips();
+  refreshBrowse(true);
+}
+
+document.getElementById("f-subject").addEventListener("change", async () => {
+  // A subject change invalidates whatever units/topics/subtopics were
+  // picked for the OLD subject, same reasoning as the old strict cascade.
+  browseSelectedUnits = [];
+  browseSelectedTopics = [];
+  browseSelectedSubtopics = [];
+  renderUnitChips();
+  await refreshTopicChips();
+  await refreshSubtopicChips();
+  refreshBrowse(true);
 });
 
-document.getElementById("f-unit").addEventListener("change", async () => {
-  const subject = document.getElementById("f-subject").value;
-  const unit = document.getElementById("f-unit").value;
-  if (subject && unit) {
-    const topics = await fetchJSON(`/api/topics?subject=${encodeURIComponent(subject)}&unit=${encodeURIComponent(unit)}`);
-    setSelectState("f-topic", true, topics.length ? "Topic: any" : "Topic: none chopped yet", topics);
-  } else {
-    resetTopicDown();
-  }
-  resetSubtopicDown();
-});
-
-document.getElementById("f-topic").addEventListener("change", async () => {
-  const subject = document.getElementById("f-subject").value;
-  const unit = document.getElementById("f-unit").value;
-  const topic = document.getElementById("f-topic").value;
-  if (subject && unit && topic) {
-    const subtopics = await fetchJSON(
-      `/api/subtopics?subject=${encodeURIComponent(subject)}&unit=${encodeURIComponent(unit)}&topic=${encodeURIComponent(topic)}`
-    );
-    setSelectState("f-subtopic", true, subtopics.length ? "Subtopic: any" : "Subtopic: none set yet", subtopics);
-  } else {
-    resetSubtopicDown();
-  }
-});
+renderUnitChips();
+renderDifficultyChips();
 
 // ---------------------------------------------------------------
 // ADD PAPER
@@ -1066,11 +1145,18 @@ document.getElementById("save-answer").addEventListener("click", async () => {
 const BROWSE_PAGE_SIZE = 60;
 
 document.getElementById("apply-filters").addEventListener("click", () => refreshBrowse(true));
-document.getElementById("clear-filters").addEventListener("click", () => {
-  ["f-subject", "f-school", "f-difficulty", "f-exam-type", "f-paper"].forEach(id => document.getElementById(id).value = "");
+document.getElementById("clear-filters").addEventListener("click", async () => {
+  ["f-subject", "f-school", "f-exam-type", "f-paper"].forEach(id => document.getElementById(id).value = "");
   document.getElementById("f-tags").value = "";
   document.getElementById("f-tags-exclude").value = "";
-  resetUnitDown(); // also clears/disables topic + subtopic beneath it
+  browseSelectedUnits = [];
+  browseSelectedTopics = [];
+  browseSelectedSubtopics = [];
+  browseSelectedDifficulties = [];
+  renderUnitChips();
+  renderDifficultyChips();
+  await refreshTopicChips();
+  await refreshSubtopicChips();
   resetPaperDown();
   refreshBrowse(true);
 });
@@ -1108,6 +1194,24 @@ let browsePage = 1;
 let browseHasMore = false;
 let browseLoading = false;
 
+// Tag-based section ordering for the "one specific paper" view -- your
+// papers are tagged "Tech free" / "Tech active" (MCQs included, since
+// they're tagged with one of those plus "MCQ"), so that's the grouping
+// key: untagged first, then Tech free, then Tech active, natural-sorted
+// by question number within each group.
+function paperClassSortKey(q) {
+  if (q.tags.includes("Tech free")) return 1;
+  if (q.tags.includes("Tech active")) return 2;
+  return 0;
+}
+function sortForSinglePaper(questions) {
+  return [...questions].sort((a, b) => {
+    const ka = paperClassSortKey(a), kb = paperClassSortKey(b);
+    if (ka !== kb) return ka - kb;
+    return naturalCompare(a.question_number, b.question_number);
+  });
+}
+
 // `reset` = true for a fresh filter/search (page 1, replace results);
 // false is used only internally by "Load more" to append the next page.
 async function refreshBrowse(reset = true) {
@@ -1122,10 +1226,6 @@ async function refreshBrowse(reset = true) {
   const params = new URLSearchParams();
   const subject = document.getElementById("f-subject").value;
   const school = document.getElementById("f-school").value;
-  const unit = document.getElementById("f-unit").value;
-  const topic = document.getElementById("f-topic").value;
-  const subtopic = document.getElementById("f-subtopic").value;
-  const difficulty = document.getElementById("f-difficulty").value;
   const examType = document.getElementById("f-exam-type").value;
   const paperId = document.getElementById("f-paper").value;
   const tagsRaw = document.getElementById("f-tags").value;
@@ -1133,21 +1233,38 @@ async function refreshBrowse(reset = true) {
 
   if (subject) params.append("subject", subject);
   if (school) params.append("school", school);
-  if (unit) params.append("unit", unit);
-  if (topic) params.append("topic", topic);
-  if (subtopic) params.append("subtopic", subtopic);
-  if (difficulty) params.append("difficulty", difficulty);
+  browseSelectedUnits.forEach(u => params.append("unit", u));
+  browseSelectedTopics.forEach(t => params.append("topic", t));
+  browseSelectedSubtopics.forEach(s => params.append("subtopic", s));
+  browseSelectedDifficulties.forEach(d => params.append("difficulty", d));
   if (examType) params.append("exam_type", examType);
   if (paperId) params.append("paper_id", paperId);
   if (tagsRaw) tagsRaw.split(",").map(t => t.trim()).filter(Boolean).forEach(t => params.append("tag", t));
   if (excludeTagsRaw) excludeTagsRaw.split(",").map(t => t.trim()).filter(Boolean).forEach(t => params.append("exclude_tag", t));
-  params.append("page", browsePage);
-  params.append("per_page", BROWSE_PAGE_SIZE);
+
+  // A specific paper is selected -- a paper only ever has dozens of
+  // questions, so fetch all of them in one go (no pagination needed)
+  // and sort into the Tech free / Tech active ordering client-side,
+  // instead of the usual server-paginated recency order.
+  const singlePaperMode = !!paperId;
+
+  if (singlePaperMode) {
+    params.append("page", 1);
+    params.append("per_page", 500);
+  } else {
+    params.append("page", browsePage);
+    params.append("per_page", BROWSE_PAGE_SIZE);
+  }
 
   try {
     const data = await fetchJSON("/api/questions?" + params.toString());
-    browseResultsCache = reset ? data.questions : browseResultsCache.concat(data.questions);
-    browseHasMore = data.has_more;
+    if (singlePaperMode) {
+      browseResultsCache = sortForSinglePaper(data.questions);
+      browseHasMore = false;
+    } else {
+      browseResultsCache = reset ? data.questions : browseResultsCache.concat(data.questions);
+      browseHasMore = data.has_more;
+    }
     document.getElementById("results-count").textContent =
       `${data.total} question(s)${browseResultsCache.length < data.total ? ` — showing ${browseResultsCache.length}` : ""}`;
 
@@ -1330,6 +1447,7 @@ function renderClassifyCurrent() {
         <label>Tags (comma separated)
           <input type="text" id="cl-tags">
         </label>
+        ${quickTagButtonsHtml("cl-tags")}
 
         <label>Notes (optional)
           <textarea id="cl-notes" rows="2"></textarea>
@@ -1370,7 +1488,12 @@ function renderClassifyCurrent() {
   }
   document.getElementById("cl-unit").addEventListener("change", () => {
     refreshClTopics();
-    refreshClSubtopics();
+    // Unit just changed, so whatever's sitting in the topic box (partial
+    // text from before the switch) no longer scopes anything -- clear
+    // subtopics now and only repopulate once a fresh topic is typed
+    // (below), instead of eagerly re-querying with a stale topic value.
+    // This matches how the original Chop form's unit handler behaves.
+    populateDatalist("cl-subtopic-list", []);
   });
   let clSubtopicTimer = null;
   document.getElementById("cl-topic").addEventListener("input", () => {
@@ -1379,6 +1502,7 @@ function renderClassifyCurrent() {
   });
 
   document.getElementById("cl-save-next").addEventListener("click", saveClassifyCurrent);
+  wireQuickTagButtons(area);
   document.getElementById("cl-skip").addEventListener("click", skipClassifyCurrent);
   document.getElementById("cl-delete").addEventListener("click", deleteClassifyCurrent);
 }
@@ -1577,6 +1701,7 @@ function renderModalEditForm(q) {
       <label>Tags (comma separated)
         <input type="text" id="modal-edit-tags">
       </label>
+      ${quickTagButtonsHtml("modal-edit-tags")}
 
       <label>Notes (optional)
         <textarea id="modal-edit-notes" rows="2"></textarea>
@@ -1598,6 +1723,7 @@ function renderModalEditForm(q) {
   document.getElementById("modal-edit-notes").value = q.notes || "";
 
   const form = document.getElementById("modal-edit-form");
+  wireQuickTagButtons(form);
   form.querySelectorAll(".diff-btn").forEach(btn => {
     if (btn.dataset.diff === q.difficulty) btn.classList.add("selected");
     btn.addEventListener("click", () => {
@@ -1817,3 +1943,6 @@ window.removeAnswerImage = removeAnswerImage;
 loadDropdownData();
 refreshBrowse();
 refreshUnclassifiedBadge();
+
+document.getElementById("q-quick-tags").innerHTML = quickTagButtonsHtml("q-tags");
+wireQuickTagButtons(document.getElementById("q-quick-tags"));

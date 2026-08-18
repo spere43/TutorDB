@@ -439,10 +439,14 @@ def build_question_query(args):
 
     subject = args.get("subject")
     school = args.get("school")
-    unit = args.get("unit")
-    topic = args.get("topic")
-    subtopic = args.get("subtopic")
-    difficulty = args.get("difficulty")
+    # unit/topic/subtopic/difficulty are multi-value: repeated query params
+    # (unit=3&unit=4) OR together within the field ("has any of these"),
+    # same as tags already do -- getlist() just returns a single-item list
+    # for the old single-value style, so this stays backward compatible.
+    units = args.getlist("unit")
+    topics = args.getlist("topic")
+    subtopics = args.getlist("subtopic")
+    difficulties = args.getlist("difficulty")
     exam_type = args.get("exam_type")
     year_level = args.get("year_level")
     paper_id = args.get("paper_id")
@@ -453,14 +457,14 @@ def build_question_query(args):
         query = query.filter(Paper.subject == subject)
     if school:
         query = query.filter(Paper.school == school)
-    if unit:
-        query = query.filter(Question.unit == int(unit))
-    if topic:
-        query = query.filter(Question.topic == topic)
-    if subtopic:
-        query = query.filter(Question.subtopic == subtopic)
-    if difficulty:
-        query = query.filter(Question.difficulty == difficulty.upper())
+    if units:
+        query = query.filter(Question.unit.in_([int(u) for u in units]))
+    if topics:
+        query = query.filter(Question.topic.in_(topics))
+    if subtopics:
+        query = query.filter(Question.subtopic.in_(subtopics))
+    if difficulties:
+        query = query.filter(Question.difficulty.in_([d.upper() for d in difficulties]))
     if exam_type:
         query = query.filter(Paper.exam_type == exam_type)
     if year_level:
@@ -797,35 +801,40 @@ def list_tags():
 
 @app.route("/api/topics", methods=["GET"])
 def list_topics():
-    """Topics are scoped to a subject+unit rather than global, so the
-    dropdown only ever shows topics that actually belong to what you've
-    selected (e.g. Physics Unit 4 topics, not every topic in the DB)."""
+    """Topics are scoped to a subject + unit(s) rather than global, so the
+    picker only ever shows topics that actually belong to what you've
+    selected (e.g. Physics Unit 4 topics, not every topic in the DB).
+    Accepts multiple ?unit= params (union across them) to support
+    multi-selecting units in Browse -- a single ?unit= still works exactly
+    as before."""
     subject = request.args.get("subject")
-    unit = request.args.get("unit")
+    units = request.args.getlist("unit")
     query = db.session.query(Question.topic).join(Paper).distinct()
     if subject:
         query = query.filter(Paper.subject == subject)
-    if unit:
-        query = query.filter(Question.unit == int(unit))
-    return jsonify(sorted([t[0] for t in query.all()]))
+    if units:
+        query = query.filter(Question.unit.in_([int(u) for u in units]))
+    return jsonify(sorted([t[0] for t in query.all() if t[0]]))
 
 
 @app.route("/api/subtopics", methods=["GET"])
 def list_subtopics():
-    """Subtopics scoped to subject+unit+topic (e.g. Bernoulli/Binomial
-    under Maths Methods Unit 3's "Discrete random variables" topic)."""
+    """Subtopics scoped to subject + unit(s) + topic(s) (e.g.
+    Bernoulli/Binomial under Maths Methods Unit 3's "Discrete random
+    variables" topic). Accepts multiple ?unit= and ?topic= params (union
+    across each) for multi-select in Browse."""
     subject = request.args.get("subject")
-    unit = request.args.get("unit")
-    topic = request.args.get("topic")
+    units = request.args.getlist("unit")
+    topics = request.args.getlist("topic")
     query = db.session.query(Question.subtopic).join(Paper) \
         .filter(Question.subtopic.isnot(None)).distinct()
     if subject:
         query = query.filter(Paper.subject == subject)
-    if unit:
-        query = query.filter(Question.unit == int(unit))
-    if topic:
-        query = query.filter(Question.topic == topic)
-    return jsonify(sorted([s[0] for s in query.all()]))
+    if units:
+        query = query.filter(Question.unit.in_([int(u) for u in units]))
+    if topics:
+        query = query.filter(Question.topic.in_(topics))
+    return jsonify(sorted([s[0] for s in query.all() if s[0]]))
 
 
 @app.route("/api/subjects", methods=["GET"])
