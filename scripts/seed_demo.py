@@ -4,8 +4,12 @@ Populate TutorDB with a small, fully fictional demo dataset.
 
 Everything here is original: the "schools" don't exist and every question
 is a short, made-up exercise rendered to an image with Pillow. It exists so
-you can try the app (Browse, filters, the full-screen viewer, worked
-solutions, and the Chop tab) without needing any real exam papers.
+you can try the app without needing any real exam papers. You get:
+
+  * 3 papers (PDFs you can practise chopping on) with worked solutions
+  * 13 classified questions, some with several topics/subtopics
+  * 2 questions flagged for review (see the Classify tab -> Reclassify)
+  * 4 unclassified "screenshot" questions waiting in the Classify queue
 
 Usage (from the project root):
 
@@ -29,7 +33,10 @@ except ImportError:
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 
-from app import app, db, FILES_DIR, Paper, Question, QuestionImage, Tag  # noqa: E402
+from app import (  # noqa: E402
+    app, db, FILES_DIR, Paper, Question, QuestionImage, Tag,
+    set_topics, get_or_create_collection,
+)
 
 # ---------------------------------------------------------------------------
 # Demo content
@@ -49,11 +56,11 @@ CALC = "Further differentiation and applications"
 QUESTIONS = [
     # ---- Paper 0: Methods, Made Up School 1 mock ---------------------------------
     dict(paper=0, num="Q1", unit=3, topic=CALC, sub="Product rule", diff="SF",
-         tags=["unique"], marks=2,
+         tags=["unique", "Tech free"], marks=2,
          q=["Differentiate  f(x) = x² sin(x)  with respect to x."],
          a=["f′(x) = 2x sin(x) + x² cos(x)", "(product rule: u = x², v = sin x)"]),
     dict(paper=0, num="Q2", unit=3, topic="Integrals", sub="Definite integrals", diff="SF",
-         tags=["appeared on mock"], marks=2,
+         tags=["appeared on mock", "Tech free"], marks=2,
          q=["Evaluate the definite integral", "", "        ∫ sin(x) dx     from x = 0 to x = π"],
          a=["[ −cos(x) ] from 0 to π  =  −cos(π) + cos(0)", "= 1 + 1  =  2"]),
     dict(paper=0, num="Q3", unit=3, topic="Discrete random variables", sub="Binomial distribution",
@@ -64,7 +71,8 @@ QUESTIONS = [
          a=["X ~ Bin(5, 0.6)", "P(X = 3) = C(5,3) × 0.6³ × 0.4²",
             "        = 10 × 0.216 × 0.16", "        = 0.3456"]),
     dict(paper=0, num="Q4", unit=3, topic=CALC, sub="Optimisation", diff="CF",
-         tags=["appeared on mock", "tech active"], marks=4,
+         subs=["Optimisation", "Rates of change"],           # several subtopics on one question
+         tags=["appeared on mock", "Tech active"], marks=4,
          q=["A farmer has 200 m of fencing to enclose a rectangular paddock",
             "that borders a straight river. No fence is needed along the river.",
             "", "Find the dimensions that maximise the enclosed area,",
@@ -84,7 +92,9 @@ QUESTIONS = [
             "and standard deviation 4.", "", "Find P(X > 58)."],
          a=["z = (58 − 50) / 4 = 2", "P(X > 58) = P(Z > 2) ≈ 0.0228"]),
     dict(paper=0, num="Q7", unit=3, topic="Integrals", sub="Rates of change", diff="CU",
-         tags=["circulating", "unique"], marks=4,
+         topics=["Integrals", CALC],                         # several topics on one question
+         flag="Difficulty looks high for a CU - check against the syllabus",
+         tags=["circulating", "unique", "Tech active"], marks=4,
          q=["Water flows into a tank at the rate", "",
             "        r(t) = 6 + 4 sin(πt / 12)   litres per hour,", "",
             "where t is the time in hours after midnight.",
@@ -112,6 +122,7 @@ QUESTIONS = [
             "Taking g = 9.8 m/s², find the maximum height reached."],
          a=["v² = u² + 2as  →  0 = 14² − 2(9.8)h", "h = 196 / 19.6 = 10 m"]),
     dict(paper=2, num="Q2", unit=3, topic="Gravity and electromagnetism", sub="Orbital motion", diff="CF",
+         flag="Unit 3 or Unit 4?",
          tags=["appeared on mock"], marks=3,
          q=["A satellite is in a circular orbit of radius 7.0 × 10⁶ m about Earth.",
             "(M = 5.97 × 10²⁴ kg,  G = 6.67 × 10⁻¹¹ N m² kg⁻²)", "",
@@ -130,6 +141,19 @@ QUESTIONS = [
          q=["How much energy is needed to heat 0.50 kg of water from 20 °C to 100 °C?",
             "(c = 4180 J kg⁻¹ K⁻¹)"],
          a=["Q = mcΔT = 0.50 × 4180 × 80 = 1.7 × 10⁵ J"]),
+]
+
+# Like screenshots added with Quick Add: unclassified questions on a subject's
+# hidden "Screenshots" paper, waiting in the Classify queue.
+SCREENSHOTS = [
+    dict(subject="Mathematical Methods", label="Screenshot",
+         lines=["Find the derivative of  y = e^(3x) cos(x)."]),
+    dict(subject="Mathematical Methods", label="Screenshot",
+         lines=["A fair coin is tossed 8 times.", "Find the probability of exactly 5 heads."]),
+    dict(subject="Physics", label="Screenshot",
+         lines=["A 2.0 kg trolley accelerates from rest at 3.0 m/s².", "How far does it travel in 4.0 s?"]),
+    dict(subject="Physics", label="Screenshot",
+         lines=["State two differences between fission and fusion."]),
 ]
 
 # ---------------------------------------------------------------------------
@@ -281,8 +305,12 @@ def main():
             for (i, q), (q_img, _) in zip(items, q_blocks):
                 page_no = placement[i]
                 question = Question(paper_id=paper.id, question_number=q["num"], unit=q["unit"],
-                                    topic=q["topic"], subtopic=q["sub"], difficulty=q["diff"],
+                                    topic=q["topic"], subtopic=None, difficulty=q["diff"],
                                     page_number=page_no)
+                # set_topics keeps the topic lists and the single-value columns in sync
+                set_topics(question, q.get("topics", [q["topic"]]), q.get("subs", [q["sub"]]))
+                if q.get("flag"):
+                    question.needs_review, question.review_note = True, q["flag"]
                 question.tags = [tag(t) for t in q["tags"]]
                 db.session.add(question)
                 db.session.flush()
@@ -298,8 +326,23 @@ def main():
                         question_id=question.id, kind="answer", page_number=None, order_index=0,
                         file_path=save_png(os.path.join("answers", subject_dir), f"a{i}.png", a_img)))
 
+        # Unclassified "screenshot" questions (no paper of their own, no chopping).
+        for i, shot in enumerate(SCREENSHOTS):
+            paper, _ = get_or_create_collection(shot["subject"])
+            question = Question(paper_id=paper.id, question_number=None, unit=None,
+                                topic="", subtopic=None, difficulty="", page_number=None)
+            db.session.add(question)
+            db.session.flush()
+            img = render_block(shot["label"], None, shot["lines"])
+            db.session.add(QuestionImage(
+                question_id=question.id, kind="question", page_number=None, order_index=0,
+                file_path=save_png(os.path.join("crops", slug(shot["subject"])), f"shot{i}.png", img)))
+
         db.session.commit()
-        print(f"Seeded {Paper.query.count()} papers and {Question.query.count()} questions into data/.")
+        unclassified = Question.query.filter(Question.topic == "").count()
+        flagged = Question.query.filter(Question.needs_review.is_(True)).count()
+        print(f"Seeded {Paper.query.filter_by(is_collection=False).count()} papers and "
+              f"{Question.query.count()} questions ({unclassified} unclassified, {flagged} flagged) into data/.")
         print("Start the app with:  python app.py   ->  http://localhost:5000")
 
 

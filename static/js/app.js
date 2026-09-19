@@ -4,6 +4,15 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/vendor/pdfjs/pdf.worker.min.mj
 // ---------------------------------------------------------------
 // Tab switching
 // ---------------------------------------------------------------
+// Show a tab without running its click handler (which would, for Chop, reset
+// the workspace to the paper picker).
+function showTabQuietly(tab) {
+  document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+  document.querySelector(`.tab-btn[data-tab="${tab}"]`).classList.add("active");
+  document.getElementById(`tab-${tab}`).classList.add("active");
+}
+
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
@@ -49,6 +58,11 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// For values placed inside an HTML attribute (escapeHtml leaves quotes alone).
+function escapeAttr(str) {
+  return escapeHtml(str).replace(/"/g, "&quot;");
+}
+
 // Your existing tags "Tech free" / "Tech active" / "MCQ" -- pressing one
 // of these just types that same text into the comma-separated tag field,
 // so a button-added tag and a hand-typed one are the exact same string
@@ -72,6 +86,117 @@ function wireQuickTagButtons(containerEl) {
       input.focus();
     });
   });
+}
+
+// ---------------------------------------------------------------
+// Multi-value topic / subtopic fields
+// ---------------------------------------------------------------
+// A question can have several topics and subtopics, typed comma-separated
+// exactly like tags ("Integrals, Discrete random variables"). The first one
+// is the primary topic.
+
+// Splits a comma-separated field into a clean list: trimmed, blanks dropped,
+// de-duplicated (case-insensitive), order kept. `known` is the names already
+// in use -- a name that itself contains a comma (e.g. "Thermal, nuclear and
+// electrical physics") is kept whole when it appears in that list, rather
+// than being split apart.
+function parseMulti(raw, known = []) {
+  const commaNames = known.filter(k => k.includes(",")).sort((a, b) => b.length - a.length);
+  const out = [];
+  let rest = raw;
+  for (;;) {
+    rest = rest.replace(/^[\s,]+/, "");
+    if (!rest) break;
+    let item = null;
+    const lower = rest.toLowerCase();
+    for (const name of commaNames) {
+      const n = name.toLowerCase();
+      if (lower.startsWith(n) && /^\s*(,|$)/.test(rest.slice(n.length))) {
+        item = rest.slice(0, n.length);
+        rest = rest.slice(n.length);
+        break;
+      }
+    }
+    if (item === null) {
+      const i = rest.indexOf(",");
+      item = i === -1 ? rest : rest.slice(0, i);
+      rest = i === -1 ? "" : rest.slice(i);
+    }
+    item = item.trim();
+    if (item && !out.some(o => o.toLowerCase() === item.toLowerCase())) out.push(item);
+  }
+  return out;
+}
+
+function sameList(a, b) {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+function datalistValues(id) {
+  const dl = document.getElementById(id);
+  return dl ? [...dl.options].map(o => o.value).filter(Boolean) : [];
+}
+
+// "&topic=A&topic=B" for the topics currently typed in a topic field -- used
+// to scope subtopic suggestions (the API ORs repeated topic params).
+function topicParams(topicInput, extraKnown = []) {
+  const known = [...datalistValues(topicInput.dataset.suggestFrom), ...extraKnown];
+  return parseMulti(topicInput.value, known).map(t => `&topic=${encodeURIComponent(t)}`).join("");
+}
+
+// A native <datalist> can only autocomplete the whole field value, so it stops
+// helping after the first comma. This keeps the datalist as the source of
+// names (so all the existing code that fills it still works) and shows the
+// ones not yet used as click-to-add chips under the field, narrowed by
+// whatever is being typed after the last comma -- same look as the tag chips.
+function attachMultiSuggest(input) {
+  const sourceId = input.dataset.suggestFrom;
+  const box = document.createElement("div");
+  box.className = "quick-tag-row";
+  // every name is shown (none hidden); a long list scrolls inside the box
+  // instead of pushing the rest of the form down
+  box.style.maxHeight = "132px";
+  box.style.overflowY = "auto";
+  input.insertAdjacentElement("afterend", box);
+
+  function render() {
+    const options = datalistValues(sourceId);
+    const cut = input.value.lastIndexOf(",");
+    const chosen = parseMulti(cut === -1 ? "" : input.value.slice(0, cut), options).map(v => v.toLowerCase());
+    const typing = input.value.slice(cut + 1).trim().toLowerCase();
+    const seen = new Set();
+    const shown = options
+      .filter(o => {
+        const key = o.trim().toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        // skip names already chosen, and one that's been typed out in full
+        return !chosen.includes(key) && key !== typing && key.includes(typing);
+      });
+    box.replaceChildren(...shown.map(o => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "quick-tag-btn";
+      btn.dataset.value = o;
+      btn.textContent = "+ " + o;
+      return btn;
+    }));
+    box.style.display = shown.length ? "" : "none";
+  }
+
+  box.addEventListener("click", e => {
+    const btn = e.target.closest("button[data-value]");
+    if (!btn) return;
+    const cut = input.value.lastIndexOf(",");
+    const head = cut === -1 ? "" : input.value.slice(0, cut + 1).trimEnd() + " ";
+    input.value = head + btn.dataset.value + ", ";
+    input.focus();
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  input.addEventListener("input", render);
+  const source = document.getElementById(sourceId);
+  if (source) new MutationObserver(render).observe(source, { childList: true });
+  render();
 }
 
 async function loadDropdownData() {
@@ -250,44 +375,188 @@ document.getElementById("add-paper-form").addEventListener("submit", async (e) =
   }
 });
 
-// Quick add: for a one-off circulating screenshot/question that isn't
-// really "a paper" -- skips straight to chopping instead of landing back
-// on this tab, since speed is the whole point.
-document.getElementById("quick-add-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const statusEl = document.getElementById("quick-add-status");
-  const subject = document.getElementById("qa-subject").value.trim();
-  const file = document.getElementById("qa-file").files[0];
+// ---------------------------------------------------------------
+// QUICK ADD
+// ---------------------------------------------------------------
+// Pick or paste screenshots (several is fine). Each becomes a question that
+// goes straight to the Classify queue -- no chopping, and no paper per
+// screenshot (they all hang off one hidden "Screenshots" paper per subject).
+// "Trim first" walks through them in Chop instead. A PDF still opens in Chop.
+let quickQueue = []; // [{ file, url }] -- url is a preview object URL (images only)
 
-  if (!subject || !file) {
-    statusEl.textContent = "Subject and a file are required.";
-    statusEl.className = "status-msg err";
+const isImageFile = f => /\.(png|jpe?g)$/i.test(f.name || "") || /^image\/(png|jpeg)$/.test(f.type || "");
+const isPdfFile = f => /\.pdf$/i.test(f.name || "") || f.type === "application/pdf";
+
+function quickStatus(text, kind) {
+  const el = document.getElementById("quick-add-status");
+  el.textContent = text;
+  el.className = "status-msg" + (kind ? " " + kind : "");
+}
+
+// A pasted screenshot often arrives as a nameless "image.png", or with no
+// extension at all -- give it a proper name so the server accepts it.
+function normalizeImageFile(f, n) {
+  if (/\.(png|jpe?g)$/i.test(f.name || "")) return f;
+  const ext = /jpeg/.test(f.type) ? "jpg" : "png";
+  return new File([f], `screenshot-${Date.now()}-${n}.${ext}`, { type: f.type || "image/png" });
+}
+
+function updateQuickSubmitLabel() {
+  const btn = document.getElementById("qa-submit");
+  const n = quickQueue.length;
+  if (n === 1 && isPdfFile(quickQueue[0].file)) btn.textContent = "Add & start chopping";
+  else if (n === 0) btn.textContent = "Add";
+  else btn.textContent = (document.getElementById("qa-trim").checked ? "Trim " : "Add ") + n + (n === 1 ? " screenshot" : " screenshots");
+}
+
+function renderQuickQueue() {
+  document.getElementById("qa-queue").replaceChildren(...quickQueue.map((item, i) => {
+    const tile = document.createElement("div");
+    tile.className = "qa-thumb" + (item.url ? "" : " qa-file");
+    if (item.url) {
+      const img = document.createElement("img");
+      img.src = item.url;
+      img.alt = "screenshot";
+      tile.append(img);
+    } else {
+      tile.append(item.file.name);
+    }
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "qa-remove";
+    x.title = "Remove";
+    x.textContent = "×";
+    x.dataset.index = i;
+    tile.append(x);
+    return tile;
+  }));
+  updateQuickSubmitLabel();
+}
+
+function clearQuickQueue() {
+  quickQueue.forEach(q => q.url && URL.revokeObjectURL(q.url));
+  quickQueue = [];
+  renderQuickQueue();
+}
+
+function addToQuickQueue(files) {
+  const accepted = [], rejected = [];
+  files.forEach((f, i) => {
+    if (isImageFile(f)) accepted.push(normalizeImageFile(f, i));
+    else if (isPdfFile(f)) accepted.push(f);
+    else rejected.push(f.name || "an unnamed file");
+  });
+  if (rejected.length) quickStatus(`Skipped ${rejected.join(", ")} -- only PNG, JPG or PDF files can be added.`, "err");
+  if (!accepted.length) return;
+  const combined = [...quickQueue.map(q => q.file), ...accepted];
+  const pdfs = combined.filter(isPdfFile).length;
+  if (pdfs && (pdfs > 1 || combined.length > 1)) {
+    quickStatus("Add screenshots, or a single PDF -- not both.", "err");
     return;
   }
+  if (!rejected.length) quickStatus("", "");
+  accepted.forEach(f => quickQueue.push({ file: f, url: isImageFile(f) ? URL.createObjectURL(f) : null }));
+  renderQuickQueue();
+}
 
-  statusEl.textContent = "Adding...";
-  statusEl.className = "status-msg";
+document.getElementById("qa-file").addEventListener("change", (e) => {
+  addToQuickQueue([...e.target.files]);
+  e.target.value = ""; // so picking the same file again still registers
+});
+document.getElementById("qa-trim").addEventListener("change", updateQuickSubmitLabel);
+document.getElementById("qa-queue").addEventListener("click", (e) => {
+  const btn = e.target.closest(".qa-remove");
+  if (!btn) return;
+  const [removed] = quickQueue.splice(Number(btn.dataset.index), 1);
+  if (removed && removed.url) URL.revokeObjectURL(removed.url);
+  renderQuickQueue();
+});
 
-  const formData = new FormData();
-  formData.append("subject", subject);
-  formData.append("file", file);
+// Ctrl/Cmd+V anywhere on the Add Paper tab. Plain-text pastes (into the
+// subject box, say) are left alone -- only clipboards that carry files.
+document.addEventListener("paste", (e) => {
+  if (!document.getElementById("tab-add").classList.contains("active")) return;
+  const cd = e.clipboardData;
+  if (!cd) return;
+  let files = [...cd.files];
+  if (!files.length) files = [...cd.items].filter(i => i.kind === "file").map(i => i.getAsFile()).filter(Boolean);
+  if (!files.length) return;
+  e.preventDefault();
+  addToQuickQueue(files);
+});
+
+function showQuickAdded(res) {
+  const statusEl = document.getElementById("quick-add-status");
+  const n = res.created.length;
+  statusEl.className = "status-msg ok";
+  statusEl.textContent = `Added ${n} screenshot${n === 1 ? "" : "s"} to the Classify queue. `;
+  const link = document.createElement("a");
+  link.href = "#";
+  link.textContent = "Classify now";
+  link.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    document.querySelector('.tab-btn[data-tab="classify"]').click();
+  });
+  statusEl.append(link);
+  if (res.skipped && res.skipped.length) {
+    const note = document.createElement("div");
+    note.className = "muted";
+    note.textContent = `Skipped: ${res.skipped.map(x => x.filename).join(", ")}`;
+    statusEl.append(note);
+  }
+}
+
+document.getElementById("quick-add-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const subject = document.getElementById("qa-subject").value.trim();
+  if (!subject) { quickStatus("Subject is required.", "err"); return; }
+  if (quickQueue.length === 0) { quickStatus("Pick or paste at least one screenshot (or a PDF).", "err"); return; }
+
+  const files = quickQueue.map(q => q.file);
+  const submitBtn = document.getElementById("qa-submit");
+  submitBtn.disabled = true;
+  quickStatus("Adding...", "");
 
   try {
-    const paper = await fetchJSON("/api/papers/quick", { method: "POST", body: formData });
-    document.getElementById("quick-add-form").reset();
-    statusEl.textContent = "";
-    loadDropdownData();
-    refreshPapersList(); // keep the background list in sync for when they come back
-
-    // jump straight to the Chop tab, workspace open on this paper
-    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
-    document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
-    document.querySelector('.tab-btn[data-tab="chop"]').classList.add("active");
-    document.getElementById("tab-chop").classList.add("active");
-    await openChop(paper);
+    if (isPdfFile(files[0])) {
+      // a PDF still becomes a paper and opens in Chop, as before
+      const formData = new FormData();
+      formData.append("subject", subject);
+      formData.append("file", files[0]);
+      const paper = await fetchJSON("/api/papers/quick", { method: "POST", body: formData });
+      clearQuickQueue();
+      quickStatus("", "");
+      loadDropdownData();
+      refreshPapersList();
+      endTrimSession();
+      showTabQuietly("chop");
+      await openChop(paper);
+    } else if (document.getElementById("qa-trim").checked) {
+      // Trim first: nothing is uploaded yet. Chop opens each picked image and
+      // only the crops you save are stored, on the subject's Screenshots paper.
+      const paper = await fetchJSON("/api/papers/collection", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subject }),
+      });
+      clearQuickQueue();
+      quickStatus("", "");
+      loadDropdownData();
+      await startTrimSession(paper, files);
+    } else {
+      const formData = new FormData();
+      formData.append("subject", subject);
+      files.forEach(f => formData.append("file", f));
+      const res = await fetchJSON("/api/screenshots", { method: "POST", body: formData });
+      clearQuickQueue();
+      loadDropdownData();
+      refreshClassifyBadges();
+      showQuickAdded(res);
+    }
   } catch (err) {
-    statusEl.textContent = "Error: " + err.message;
-    statusEl.className = "status-msg err";
+    quickStatus("Error: " + err.message, "err");
+  } finally {
+    submitBtn.disabled = false;
   }
 });
 
@@ -298,7 +567,7 @@ let papersListCache = [];
 // narrows to one subject; `rowRenderer` produces each paper's own row
 // markup, since the Add Paper list and Chop picker use different row
 // templates for the same underlying data.
-function renderGroupedPapers(papers, filterSubject, rowRenderer, emptyMessage) {
+function renderGroupedPapers(papers, filterSubject, rowRenderer, emptyMessage, context) {
   const filtered = filterSubject ? papers.filter(p => p.subject === filterSubject) : papers;
   if (filtered.length === 0) {
     return `<p class="muted">${emptyMessage}</p>`;
@@ -309,10 +578,131 @@ function renderGroupedPapers(papers, filterSubject, rowRenderer, emptyMessage) {
     groups[p.subject].push(p);
   });
   const subjects = Object.keys(groups).sort();
-  return subjects.map(subj => `
-    <h4 class="paper-group-heading">${escapeHtml(subj)} <span class="muted">(${groups[subj].length})</span></h4>
-    ${groups[subj].map(rowRenderer).join("")}
-  `).join("");
+  return subjects.map(subj => {
+    // Papers made with Quick Add collapse into one "Random screenshots" row
+    // per subject instead of cluttering the list one row each.
+    const regular = groups[subj].filter(p => !isQuickPaper(p));
+    const quick = groups[subj].filter(isQuickPaper);
+    return `
+    <h4 class="paper-group-heading">${escapeHtml(subj)}${regular.length ? ` <span class="muted">(${regular.length})</span>` : ""}</h4>
+    ${quick.length ? quickGroupHtml(context, subj, quick) : ""}
+    ${regular.map(rowRenderer).join("")}
+  `;
+  }).join("");
+}
+
+// Papers made with Quick Add (before screenshots became questions directly)
+// all carry these placeholder values, which is what identifies one. Editing
+// a paper's details later turns it back into a normal paper.
+const QUICK_SCHOOL = "Uncategorized";
+const QUICK_EXAM_TYPE = "misc";
+const isQuickPaper = p => !p.is_collection && p.school === QUICK_SCHOOL && p.exam_type === QUICK_EXAM_TYPE;
+
+const expandedQuickGroups = new Set(); // "add:Physics" / "chop:Physics"
+const quickSelected = new Set();        // paper ids ticked in the Add tab's galleries
+
+function quickGroupHtml(context, subject, quick) {
+  const open = expandedQuickGroups.has(`${context}:${subject}`);
+  const subj = escapeAttr(subject);
+  const head = `<button type="button" class="quick-group-toggle" data-qg="toggle" data-subject="${subj}">${open ? "▾" : "▸"} Random screenshots <span class="muted">(${quick.length})</span></button>`;
+  if (!open) return `<div class="quick-group">${head}</div>`;
+  const picked = quick.filter(p => quickSelected.has(p.id)).length;
+  const tools = context === "add" ? `
+      <div class="quick-gallery-toolbar">
+        <button type="button" class="secondary small" data-qg="select-all" data-subject="${subj}">Select all</button>
+        <button type="button" class="secondary small" data-qg="select-empty" data-subject="${subj}">Select ones with no questions</button>
+        <button type="button" class="secondary small" data-qg="select-none" data-subject="${subj}">Clear</button>
+        <button type="button" class="small" data-qg="delete-selected" data-subject="${subj}" ${picked ? "" : "disabled"}>Delete selected (${picked})</button>
+      </div>` : "";
+  return `<div class="quick-group">${head}<div class="quick-gallery">${tools}<div class="quick-tiles">${quick.map(p => quickTileHtml(context, p)).join("")}</div></div></div>`;
+}
+
+function quickTileHtml(context, p) {
+  const url = `/files/${escapeAttr(p.file_path)}`;
+  const thumb = IMAGE_PATH_RE.test(p.file_path)
+    ? `<a class="qt-thumb" href="${url}" target="_blank" title="Open full size"><img loading="lazy" src="${url}" alt="Screenshot"></a>`
+    : `<a class="qt-thumb" href="${url}" target="_blank"><span class="qt-file">${escapeHtml(p.file_path.split(/[\\/]/).pop())}</span></a>`;
+  const used = p.question_count > 0 ? `${p.question_count} question${p.question_count === 1 ? "" : "s"}` : "no questions yet";
+  const ticked = context === "add" && quickSelected.has(p.id);
+  const check = context === "add" ? `<input type="checkbox" data-qg-check="${p.id}" ${ticked ? "checked" : ""}>` : "";
+  const del = context === "add" ? `<button type="button" class="secondary small" data-qg="delete-one" data-id="${p.id}">Delete</button>` : "";
+  return `
+    <div class="quick-tile${ticked ? " selected" : ""}">
+      <div class="qt-top">${check}<span class="muted">${used}</span></div>
+      ${thumb}
+      <div class="qt-actions"><button type="button" class="small" data-qg="chop" data-id="${p.id}">Chop</button>${del}</div>
+    </div>`;
+}
+
+function quickGroupHandler(context) {
+  return (e) => {
+    const el = e.target.closest("[data-qg]");
+    if (!el) return;
+    const action = el.dataset.qg, subject = el.dataset.subject, id = Number(el.dataset.id);
+    const list = context === "add" ? papersListCache : papersCache;
+    const inGroup = () => list.filter(p => p.subject === subject && isQuickPaper(p));
+    const rerender = () => (context === "add" ? renderPapersListFiltered() : renderChopPickerFiltered());
+    if (action === "toggle") {
+      const key = `${context}:${subject}`;
+      if (expandedQuickGroups.has(key)) expandedQuickGroups.delete(key); else expandedQuickGroups.add(key);
+      rerender();
+    } else if (action === "select-all") {
+      inGroup().forEach(p => quickSelected.add(p.id));
+      rerender();
+    } else if (action === "select-empty") {
+      inGroup().forEach(p => (p.question_count === 0 ? quickSelected.add(p.id) : quickSelected.delete(p.id)));
+      rerender();
+    } else if (action === "select-none") {
+      inGroup().forEach(p => quickSelected.delete(p.id));
+      rerender();
+    } else if (action === "delete-selected") {
+      deleteSelectedQuick(subject);
+    } else if (action === "delete-one") {
+      deletePaper(id);
+    } else if (action === "chop") {
+      chopQuickPaper(context, id);
+    }
+  };
+}
+
+function updateQuickDeleteButtons() {
+  document.querySelectorAll('#papers-list [data-qg="delete-selected"]').forEach(btn => {
+    const n = papersListCache.filter(p => p.subject === btn.dataset.subject && isQuickPaper(p) && quickSelected.has(p.id)).length;
+    btn.textContent = `Delete selected (${n})`;
+    btn.disabled = n === 0;
+  });
+}
+
+async function chopQuickPaper(context, id) {
+  const paper = (context === "add" ? papersListCache : papersCache).find(p => p.id === id);
+  if (!paper) return;
+  endTrimSession();
+  if (context === "add") showTabQuietly("chop");
+  try {
+    await openChop(paper);
+  } catch (err) {
+    alert("Couldn't open this file in Chop: " + err.message);
+  }
+}
+
+async function deleteSelectedQuick(subject) {
+  const chosen = papersListCache.filter(p => p.subject === subject && isQuickPaper(p) && quickSelected.has(p.id));
+  if (chosen.length === 0) return;
+  const questions = chosen.reduce((n, p) => n + p.question_count, 0);
+  const what = `${chosen.length} screenshot${chosen.length === 1 ? "" : "s"}`;
+  const warn = questions > 0 ? ` ${questions} question${questions === 1 ? "" : "s"} already chopped from them will be deleted too.` : "";
+  if (!confirm(`Delete ${what}?${warn}`)) return;
+  try {
+    for (const p of chosen) {
+      await fetchJSON(`/api/papers/${p.id}`, { method: "DELETE" });
+      quickSelected.delete(p.id);
+    }
+  } catch (err) {
+    alert("Couldn't delete everything: " + err.message);
+  }
+  await refreshPapersList();
+  refreshClassifyBadges();
+  loadDropdownData();
 }
 
 function paperRowTemplate(p) {
@@ -334,8 +724,9 @@ function paperRowTemplate(p) {
 }
 
 async function refreshPapersList() {
-  const papers = await fetchJSON("/api/papers");
+  const papers = (await fetchJSON("/api/papers")).filter(p => !p.is_collection); // collections are managed via their questions
   papersListCache = papers;
+  for (const id of [...quickSelected]) if (!papers.some(p => p.id === id)) quickSelected.delete(id);
   populateSelect("papers-subject-filter", [...new Set(papers.map(p => p.subject))].sort(), "All subjects");
   renderPapersListFiltered();
 }
@@ -343,10 +734,19 @@ async function refreshPapersList() {
 function renderPapersListFiltered() {
   const filterSubject = document.getElementById("papers-subject-filter").value;
   document.getElementById("papers-list").innerHTML =
-    renderGroupedPapers(papersListCache, filterSubject, paperRowTemplate, "No papers added yet.");
+    renderGroupedPapers(papersListCache, filterSubject, paperRowTemplate, "No papers added yet.", "add");
 }
 
 document.getElementById("papers-subject-filter").addEventListener("change", renderPapersListFiltered);
+document.getElementById("papers-list").addEventListener("click", quickGroupHandler("add"));
+document.getElementById("papers-list").addEventListener("change", (e) => {
+  const cb = e.target.closest("[data-qg-check]");
+  if (!cb) return;
+  const id = Number(cb.dataset.qgCheck);
+  if (cb.checked) quickSelected.add(id); else quickSelected.delete(id);
+  cb.closest(".quick-tile").classList.toggle("selected", cb.checked);
+  updateQuickDeleteButtons();
+});
 
 // Lets you fix/backfill a paper's metadata -- e.g. set "unit" on a paper
 // added before that field existed -- without touching the uploaded file
@@ -421,6 +821,7 @@ async function deletePaper(id) {
   if (!confirm("Delete this paper and all its chopped questions?")) return;
   await fetchJSON(`/api/papers/${id}`, { method: "DELETE" });
   refreshPapersList();
+  refreshClassifyBadges(); // its questions may have been unclassified or flagged
 }
 
 // ---------------------------------------------------------------
@@ -439,9 +840,10 @@ function chopPaperRowTemplate(p) {
 }
 
 async function refreshChopPicker() {
+  endTrimSession();
   document.getElementById("chop-workspace").style.display = "none";
   document.getElementById("chop-picker").style.display = "block";
-  const papers = await fetchJSON("/api/papers");
+  const papers = (await fetchJSON("/api/papers")).filter(p => !p.is_collection);
   papersCache = papers;
   populateSelect("chop-subject-filter", [...new Set(papers.map(p => p.subject))].sort(), "All subjects");
   renderChopPickerFiltered();
@@ -451,11 +853,13 @@ function renderChopPickerFiltered() {
   const filterSubject = document.getElementById("chop-subject-filter").value;
   document.getElementById("chop-papers-list").innerHTML = renderGroupedPapers(
     papersCache, filterSubject, chopPaperRowTemplate,
-    papersCache.length === 0 ? "No papers yet — add one in the Add Paper tab first." : "No papers for this subject."
+    papersCache.length === 0 ? "No papers yet — add one in the Add Paper tab first." : "No papers for this subject.",
+    "chop"
   );
 }
 
 document.getElementById("chop-subject-filter").addEventListener("change", renderChopPickerFiltered);
+document.getElementById("chop-papers-list").addEventListener("click", quickGroupHandler("chop"));
 document.getElementById("chop-back").addEventListener("click", refreshChopPicker);
 
 let papersCache = [];
@@ -490,6 +894,7 @@ const ZOOM_STEP_FACTOR = 1.15;
 async function openChopById(paperId) {
   const paper = papersCache.find(p => p.id === paperId);
   if (!paper) return;
+  endTrimSession();
   await openChop(paper);
 }
 
@@ -543,14 +948,14 @@ let subtopicFetchTimer = null;
 document.getElementById("q-topic").addEventListener("input", () => {
   clearTimeout(subtopicFetchTimer);
   subtopicFetchTimer = setTimeout(async () => {
-    const topic = document.getElementById("q-topic").value.trim();
+    const topics = topicParams(document.getElementById("q-topic"));
     const unit = document.getElementById("q-unit").value;
-    if (!currentPaper || !unit || !topic) {
+    if (!currentPaper || !unit || !topics) {
       populateDatalist("subtopic-list", []);
       return;
     }
     const subtopics = await fetchJSON(
-      `/api/subtopics?subject=${encodeURIComponent(currentPaper.subject)}&unit=${encodeURIComponent(unit)}&topic=${encodeURIComponent(topic)}`
+      `/api/subtopics?subject=${encodeURIComponent(currentPaper.subject)}&unit=${encodeURIComponent(unit)}${topics}`
     );
     populateDatalist("subtopic-list", subtopics);
   }, 250);
@@ -560,12 +965,111 @@ document.getElementById("q-topic").addEventListener("input", () => {
 // pdf.js, depending on which mode we're chopping in.
 async function loadPdfForMode() {
   const path = chopMode === "answers" ? currentPaper.solution_file_path : currentPaper.file_path;
-  const loadingTask = pdfjsLib.getDocument(`/files/${path}`);
-  pdfDoc = await loadingTask.promise;
+  if (chopSession && chopMode === "questions") {
+    // a freshly-picked screenshot being trimmed (still on this device)
+    pdfDoc = await loadImageDocument(chopSession.urls[chopSession.index]);
+  } else if (IMAGE_PATH_RE.test(path)) {
+    // an image stored as a paper's file (e.g. from the old Quick Add)
+    pdfDoc = await loadImageDocument(`/files/${path}`);
+  } else {
+    pdfDoc = await pdfjsLib.getDocument(`/files/${path}`).promise;
+  }
   currentPage = 1;
   await fitToWidth();
   await renderPage(currentPage);
 }
+
+// ---- Images as one-page "documents" ----
+// A screenshot is a single raster page. This wraps a loaded <img> in the small
+// interface the Chop code already uses for a pdf.js document/page
+// (numPages, getPage, getViewport, render), so the viewer, zoom, box drawing
+// and cropping all work on images unchanged. The image's natural pixel size is
+// scale 1, which lets crops be cut from the original pixels 1:1.
+const IMAGE_PATH_RE = /\.(png|jpe?g)$/i;
+
+class ImagePage {
+  constructor(img) {
+    this.img = img;
+    this.isImage = true;
+  }
+  getViewport({ scale }) {
+    return { width: this.img.naturalWidth * scale, height: this.img.naturalHeight * scale, scale };
+  }
+  render({ canvasContext: ctx, viewport, transform }) {
+    ctx.save();
+    if (transform) ctx.transform(...transform);
+    ctx.fillStyle = "#fff"; // a transparent PNG shouldn't show the dark page behind it
+    ctx.fillRect(0, 0, viewport.width, viewport.height);
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(this.img, 0, 0, viewport.width, viewport.height);
+    ctx.restore();
+    return { promise: Promise.resolve() };
+  }
+}
+
+async function loadImageDocument(url) {
+  const img = new Image();
+  img.src = url;
+  await img.decode(); // rejects if the file isn't a readable image
+  const page = new ImagePage(img);
+  return { numPages: 1, getPage: async () => page };
+}
+
+// ---- Trimming freshly-picked screenshots (Quick Add's "Trim first") ----
+// { files, urls, index } while walking through the screenshots you picked. The
+// untrimmed originals are never uploaded -- only the crops you save are, as
+// questions on the subject's Screenshots paper.
+let chopSession = null;
+
+function endTrimSession() {
+  if (!chopSession) return;
+  chopSession.urls.forEach(u => URL.revokeObjectURL(u));
+  chopSession = null;
+  document.getElementById("chop-session").style.display = "none";
+}
+
+function renderSessionStrip() {
+  const strip = document.getElementById("chop-session");
+  if (!chopSession) { strip.style.display = "none"; return; }
+  const last = chopSession.index === chopSession.files.length - 1;
+  strip.style.display = "flex";
+  document.getElementById("session-label").textContent = `Screenshot ${chopSession.index + 1} / ${chopSession.files.length}`;
+  document.getElementById("session-prev").disabled = chopSession.index === 0;
+  document.getElementById("session-next").textContent = last ? "Finish" : "Next ›";
+}
+
+async function startTrimSession(paper, files) {
+  endTrimSession();
+  chopSession = { files, urls: files.map(f => URL.createObjectURL(f)), index: 0 };
+  showTabQuietly("chop");
+  await openChop(paper);
+  document.getElementById("chop-paper-title").textContent = `Screenshots — ${paper.subject}`;
+  renderSessionStrip();
+}
+
+async function sessionStep(delta) {
+  if (!chopSession) return;
+  if (pendingCropBlob || stagedQuestionParts.length) {
+    if (!confirm("Discard the selection you haven't saved on this screenshot?")) return;
+  }
+  const next = chopSession.index + delta;
+  if (next < 0) return;
+  if (next >= chopSession.files.length) { // Finish
+    endTrimSession();
+    refreshClassifyBadges();
+    showTabQuietly("add");
+    quickStatus("Finished trimming.", "ok");
+    return;
+  }
+  chopSession.index = next;
+  resetQuestionForm();
+  clearOverlay();
+  await loadPdfForMode();
+  renderSessionStrip();
+}
+
+document.getElementById("session-prev").addEventListener("click", () => sessionStep(-1));
+document.getElementById("session-next").addEventListener("click", () => sessionStep(1));
 
 function showChopFormForMode() {
   document.getElementById("chop-form-questions").style.display = chopMode === "questions" ? "block" : "none";
@@ -626,7 +1130,7 @@ async function populateAnswerQuestionSelect() {
   });
   select.innerHTML = questions.map(q => `
     <option value="${q.id}" data-has-answer="${q.has_answer ? "1" : ""}">
-      ${q.question_number ? escapeHtml(q.question_number) + " — " : ""}${escapeHtml(q.topic)} (${q.difficulty})${q.has_answer ? " [already has an answer]" : ""}
+      ${q.question_number ? escapeHtml(q.question_number) + " — " : ""}${escapeHtml(q.topics.join(", "))} (${q.difficulty})${q.has_answer ? " [already has an answer]" : ""}
     </option>
   `).join("");
 }
@@ -863,19 +1367,102 @@ overlay.addEventListener("touchstart", startDraw, { passive: false });
 overlay.addEventListener("touchmove", moveDraw, { passive: false });
 overlay.addEventListener("touchend", endDraw, { passive: false });
 
-function cropSelection(x, y, w, h) {
+// ---- Crop export resolution ----
+// The on-screen canvas is only as sharp as the current zoom level and the
+// device's pixel density, so copying pixels straight off it gives soft,
+// low-resolution crops (and the size varied with zoom). Instead, when a box
+// is drawn, just that region is re-rendered straight from the PDF at a
+// fixed, higher scale.
+//
+// PDF pages are laid out in points (1/72 inch), so a scale of 3 is roughly
+// 216 DPI. Raise it for sharper crops (bigger files); lower it to save disk.
+const CROP_EXPORT_SCALE = 3;
+// Browsers cap canvas size (iOS Safari is the tightest at ~16.7M pixels), so
+// the export scale is reduced automatically for very large selections.
+const MAX_CROP_PIXELS = 16000000;
+
+let cropRequestId = 0; // lets a newer selection supersede one still rendering
+
+// x/y/w/h arrive in overlay-canvas pixels (what the mouse/touch handlers
+// work in). Converts them to page units at scale 1, then renders only that
+// region into an offscreen canvas at the export scale.
+async function renderCropHighRes(x, y, w, h) {
+  // Snapshot everything the maths depends on BEFORE awaiting, so a zoom or
+  // page flip landing mid-render can't skew the selection.
+  const doc = pdfDoc;
+  const pageNum = currentPage;
+  const cssWidth = parseFloat(overlay.style.width); // on-screen page width, CSS px
+  const renderedDpr = overlay.width / cssWidth;
+  const pxToPage = 1 / (renderedDpr * scale);
+
+  const page = await doc.getPage(pageNum);
+  let pageX = x * pxToPage, pageY = y * pxToPage;
+  let pageW = w * pxToPage, pageH = h * pxToPage;
+
+  // A screenshot is already raster: cut its own pixels out 1:1 (a whole-pixel
+  // box, no resampling) instead of re-rendering at a higher scale, which would
+  // only upsample it.
+  const native = !!page.isImage;
+  if (native) {
+    const imgW = page.img.naturalWidth, imgH = page.img.naturalHeight;
+    const x0 = Math.max(0, Math.round(pageX)), y0 = Math.max(0, Math.round(pageY));
+    const x1 = Math.min(imgW, Math.round(pageX + pageW)), y1 = Math.min(imgH, Math.round(pageY + pageH));
+    pageX = x0;
+    pageY = y0;
+    pageW = Math.max(1, x1 - x0);
+    pageH = Math.max(1, y1 - y0);
+  }
+
+  // Never export softer than what's on screen (e.g. zoomed in on a Retina
+  // display), but never exceed the browser's canvas limit either.
+  let exportScale = native ? 1 : Math.max(CROP_EXPORT_SCALE, scale * renderedDpr);
+  const pixels = pageW * pageH * exportScale * exportScale;
+  if (pixels > MAX_CROP_PIXELS) exportScale *= Math.sqrt(MAX_CROP_PIXELS / pixels);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(pageW * exportScale));
+  canvas.height = Math.max(1, Math.round(pageH * exportScale));
+
+  await page.render({
+    canvasContext: canvas.getContext("2d"),
+    viewport: page.getViewport({ scale: exportScale }),
+    // shift the page so the selected region lands at the canvas origin
+    transform: [1, 0, 0, 1, -pageX * exportScale, -pageY * exportScale],
+  }).promise;
+  return canvas;
+}
+
+// Original behaviour, kept as a fallback in case the high-res render fails:
+// copy the selection's pixels straight off the on-screen canvas.
+function copyCropFromScreen(x, y, w, h) {
   const pdfCanvas = document.getElementById("pdf-canvas");
-  const cropCanvas = document.createElement("canvas");
-  cropCanvas.width = w;
-  cropCanvas.height = h;
-  const ctx = cropCanvas.getContext("2d");
-  ctx.drawImage(pdfCanvas, x, y, w, h, 0, 0, w, h);
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  canvas.getContext("2d").drawImage(pdfCanvas, x, y, w, h, 0, 0, w, h);
+  return canvas;
+}
+
+async function cropSelection(x, y, w, h) {
+  const requestId = ++cropRequestId;
+  const pageNum = currentPage; // capture now: the user may flip pages mid-render
+  const mode = chopMode;
+
+  let cropCanvas;
+  try {
+    cropCanvas = await renderCropHighRes(x, y, w, h);
+  } catch (err) {
+    console.warn("High-res crop failed, using on-screen pixels instead:", err);
+    cropCanvas = copyCropFromScreen(x, y, w, h);
+  }
+  if (requestId !== cropRequestId) return; // a newer selection took over
 
   cropCanvas.toBlob(blob => {
+    if (requestId !== cropRequestId) return;
     pendingCropBlob = blob;
-    pendingCropPage = currentPage;
+    pendingCropPage = pageNum;
     const previewUrl = URL.createObjectURL(blob);
-    if (chopMode === "answers") {
+    if (mode === "answers") {
       document.getElementById("answer-crop-preview").src = previewUrl;
       document.getElementById("answer-crop-preview-wrap").style.display = "block";
       document.getElementById("save-answer").disabled = false;
@@ -887,6 +1474,7 @@ function cropSelection(x, y, w, h) {
       document.getElementById("quick-save-question").disabled = false;
       document.getElementById("add-question-part").disabled = false;
     }
+    cropCanvas.width = cropCanvas.height = 0; // free the canvas memory promptly
   }, "image/png");
 }
 
@@ -953,6 +1541,9 @@ function resetQuestionForm() {
   document.getElementById("q-number").value = "";
   document.getElementById("q-topic").value = "";
   document.getElementById("q-subtopic").value = "";
+  // clearing programmatically fires no event, so refresh the suggestion chips
+  document.getElementById("q-topic").dispatchEvent(new Event("input"));
+  document.getElementById("q-subtopic").dispatchEvent(new Event("input"));
   document.getElementById("q-tags").value = "";
   document.getElementById("q-notes").value = "";
   document.querySelectorAll(".diff-btn").forEach(b => b.classList.remove("selected"));
@@ -993,7 +1584,7 @@ async function uploadParts(questionId, endpoint, fileField, parts) {
 
 document.getElementById("save-question").addEventListener("click", async () => {
   const statusEl = document.getElementById("chop-status");
-  const topic = document.getElementById("q-topic").value.trim();
+  const topics = parseMulti(document.getElementById("q-topic").value, datalistValues("topic-list"));
   const unit = document.getElementById("q-unit").value;
 
   const parts = [...stagedQuestionParts];
@@ -1004,7 +1595,7 @@ document.getElementById("save-question").addEventListener("click", async () => {
     statusEl.className = "status-msg err";
     return;
   }
-  if (!topic) {
+  if (!topics.length) {
     statusEl.textContent = "Topic is required.";
     statusEl.className = "status-msg err";
     return;
@@ -1034,8 +1625,8 @@ document.getElementById("save-question").addEventListener("click", async () => {
         paper_id: currentPaperId,
         question_number: document.getElementById("q-number").value.trim() || null,
         unit: parseInt(unit, 10),
-        topic,
-        subtopic: document.getElementById("q-subtopic").value.trim() || null,
+        topics,
+        subtopics: parseMulti(document.getElementById("q-subtopic").value, datalistValues("subtopic-list")),
         difficulty: selectedDifficulty,
         page_number: parts[0].page,
         notes: document.getElementById("q-notes").value.trim() || null,
@@ -1094,7 +1685,7 @@ document.getElementById("quick-save-question").addEventListener("click", async (
     statusEl.className = "status-msg ok";
     clearOverlay();
     resetQuestionForm();
-    refreshUnclassifiedBadge();
+    refreshClassifyBadges();
   } catch (err) {
     statusEl.textContent = "Error: " + err.message;
     statusEl.className = "status-msg err";
@@ -1177,12 +1768,16 @@ async function refreshPaperFilterOptions() {
   }
   const school = document.getElementById("f-school").value;
   const papers = await fetchJSON("/api/papers");
-  const matches = papers.filter(p => p.subject === subject && (!school || p.school === school));
+  // Quick Add papers are all identical placeholders ("Uncategorized -- Y12,
+  // misc"), so they're left out; the School filter finds them. A subject's
+  // Screenshots collection gets a readable name.
+  const matches = papers.filter(p => p.subject === subject && (!school || p.school === school) && !isQuickPaper(p));
   const el = document.getElementById("f-paper");
   const current = el.value;
   el.disabled = false;
-  el.innerHTML = `<option value="">Paper: any</option>` + matches.map(p =>
-    `<option value="${p.id}">${escapeHtml(p.school)} — Y${p.year_level}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""}</option>`
+  el.innerHTML = `<option value="">Paper: any</option>` + matches.map(p => p.is_collection
+    ? `<option value="${p.id}">Screenshots (added with Quick Add)</option>`
+    : `<option value="${p.id}">${escapeHtml(p.school)} — Y${p.year_level}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""}</option>`
   ).join("");
   if (matches.some(p => String(p.id) === current)) el.value = current;
 }
@@ -1316,11 +1911,14 @@ function renderQuestionCard(q) {
       }
       ${q.question_images.length > 1 ? `<div class="page-count-badge">${q.question_images.length} pages</div>` : ""}
       ${!q.is_classified ? `<div class="page-count-badge">⚠ unclassified</div>` : ""}
+      ${q.needs_review ? `<div class="page-count-badge review-flag" title="${escapeAttr(q.review_note || "Flagged for review")}">⚑ review</div>` : ""}
       <div class="meta-row">
         <span>${escapeHtml(q.school)} · ${escapeHtml(q.subject)}</span>
         <span class="diff-tag ${q.difficulty}">${q.difficulty || "?"}</span>
       </div>
-      <div class="muted">${q.topic ? escapeHtml(q.topic) + (q.subtopic ? " · " + escapeHtml(q.subtopic) : "") : "Not classified yet"}</div>
+      ${q.topics.length
+        ? `<div>${q.topics.map(t => `<span class="tag-pill topic-pill" title="Topic">${escapeHtml(t)}</span>`).join("")}${q.subtopics.map(s => `<span class="tag-pill subtopic-pill" title="Subtopic">${escapeHtml(s)}</span>`).join("")}</div>`
+        : `<div class="muted">Not classified yet</div>`}
       <div>${q.tags.map(t => `<span class="tag-pill">${escapeHtml(t)}</span>`).join("")}</div>
       <div class="card-actions">
         <button class="secondary" onclick="openQuestionModal(${q.id})">Details</button>
@@ -1343,8 +1941,42 @@ let classifyQueue = [];
 let classifyRemaining = 0;
 let classifySubjectFilter = "";
 let classifySelectedDifficulty = null;
+// "classify" = the quick-saved backlog; "reclassify" = questions flagged for review
+let classifyMode = "classify";
+// Pending subtopic-suggestion refresh for the CURRENT form. Module-level so a
+// re-render (next question, empty state, mode switch) can cancel it -- it must
+// never fire against a form that's already been replaced.
+let clSubtopicTimer = null;
+
+const CLASSIFY_COPY = {
+  classify: {
+    title: "Classify",
+    hint: 'Questions chopped with "Quick save (classify later)" on the Chop tab show up here, one at a time, so you can sort through a whole backlog quickly without re-opening a picker each time.',
+    remaining: "unclassified",
+    empty: "Nothing to classify -- everything's sorted.",
+  },
+  reclassify: {
+    title: "Reclassify",
+    hint: "Questions you flagged for review in the viewer show up here with their current classification filled in. Fix what's wrong and save, or unflag if it's fine as it is.",
+    remaining: "flagged for review",
+    empty: "Nothing flagged for review.",
+  },
+};
+
+document.querySelectorAll("#classify-mode-switch .classify-mode-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    if (classifyMode === btn.dataset.mode) return;
+    classifyMode = btn.dataset.mode;
+    document.querySelectorAll("#classify-mode-switch .classify-mode-btn")
+      .forEach(b => b.classList.toggle("active", b === btn));
+    refreshClassifyTab();
+  });
+});
 
 async function refreshClassifyTab() {
+  document.getElementById("classify-title").textContent = CLASSIFY_COPY[classifyMode].title;
+  document.getElementById("classify-hint").textContent = CLASSIFY_COPY[classifyMode].hint;
+  refreshClassifyBadges();
   const subjects = await fetchJSON("/api/subjects");
   populateSelect("classify-subject-filter", subjects, "All subjects");
   document.getElementById("classify-subject-filter").value = classifySubjectFilter;
@@ -1364,7 +1996,7 @@ document.getElementById("classify-subject-filter").addEventListener("change", ()
 // whether the backlog is a dozen questions or several hundred.
 async function loadMoreClassifyQueue() {
   const params = new URLSearchParams();
-  params.append("unclassified", "1");
+  params.append(classifyMode === "reclassify" ? "needs_review" : "unclassified", "1");
   if (classifySubjectFilter) params.append("subject", classifySubjectFilter);
   params.append("per_page", "40");
   const data = await fetchJSON("/api/questions?" + params.toString());
@@ -1375,23 +2007,38 @@ async function loadMoreClassifyQueue() {
   classifyQueue = classifyQueue.concat(data.questions.filter(q => !existingIds.has(q.id)));
 }
 
-async function refreshUnclassifiedBadge() {
-  const data = await fetchJSON("/api/questions?unclassified=1&per_page=1");
-  const btn = document.getElementById("classify-tab-btn");
-  btn.innerHTML = data.total > 0
-    ? `Classify <span class="unclassified-badge">${data.total}</span>`
-    : "Classify";
+// The two coloured counts read "99+" / "9+" past their cap (the exact number
+// is in the tooltip, and on the Classify tab itself).
+const CLASSIFY_BADGE_CAP = 99;
+const REVIEW_BADGE_CAP = 9;
+
+function badgeHtml(cls, n, cap, label) {
+  if (n <= 0) return "";
+  return `<span class="${cls}" title="${n} ${label}">${n > cap ? cap + "+" : n}</span>`;
+}
+
+// One request feeds both counts: on the tab button and on the
+// Classify / Reclassify switch inside the tab.
+async function refreshClassifyBadges() {
+  const { unclassified, needs_review } = await fetchJSON("/api/classify-counts");
+  const toClassify = badgeHtml("unclassified-badge", unclassified, CLASSIFY_BADGE_CAP, "to classify");
+  const toReview = badgeHtml("review-badge", needs_review, REVIEW_BADGE_CAP, "flagged for review");
+  document.getElementById("classify-tab-btn").innerHTML = `Classify${toClassify}${toReview}`;
+  document.getElementById("cl-mode-classify").innerHTML = `Classify${toClassify}`;
+  document.getElementById("cl-mode-reclassify").innerHTML = `Reclassify${toReview}`;
 }
 
 function renderClassifyCurrent() {
+  clearTimeout(clSubtopicTimer);
   const area = document.getElementById("classify-area");
+  const copy = CLASSIFY_COPY[classifyMode];
   document.getElementById("classify-remaining").textContent =
-    classifyRemaining > 0 ? `${classifyRemaining} unclassified` : "";
+    classifyRemaining > 0 ? `${classifyRemaining} ${copy.remaining}` : "";
 
   const q = classifyQueue[0];
   if (!q) {
     area.innerHTML = classifyRemaining === 0
-      ? `<p class="muted">Nothing to classify -- everything's sorted.</p>`
+      ? `<p class="muted">${copy.empty}</p>`
       : `<p class="muted">Loading...</p>`;
     return;
   }
@@ -1411,6 +2058,7 @@ function renderClassifyCurrent() {
         ${pages || `<p class="muted">No crop image (page ${q.page_number || "?"})</p>`}
       </div>
       <div class="classify-form">
+        ${classifyMode === "reclassify" ? flagBannerHtml(q) : ""}
         <div class="muted">${escapeHtml(q.school)} · ${escapeHtml(q.subject)}</div>
 
         <label>Unit
@@ -1423,13 +2071,13 @@ function renderClassifyCurrent() {
           </select>
         </label>
 
-        <label>Topic
-          <input type="text" id="cl-topic" list="cl-topic-list" autofocus>
+        <label>Topic (comma separated)
+          <input type="text" id="cl-topic" data-suggest-from="cl-topic-list" autofocus>
           <datalist id="cl-topic-list"></datalist>
         </label>
 
-        <label>Subtopic (optional)
-          <input type="text" id="cl-subtopic" list="cl-subtopic-list">
+        <label>Subtopic (optional, comma separated)
+          <input type="text" id="cl-subtopic" data-suggest-from="cl-subtopic-list">
           <datalist id="cl-subtopic-list"></datalist>
         </label>
 
@@ -1454,7 +2102,8 @@ function renderClassifyCurrent() {
         </label>
 
         <div class="classify-actions">
-          <button type="button" id="cl-save-next">Save &amp; next</button>
+          <button type="button" id="cl-save-next">${classifyMode === "reclassify" ? "Save &amp; clear flag" : "Save &amp; next"}</button>
+          ${classifyMode === "reclassify" ? `<button type="button" class="secondary" id="cl-unflag">Looks fine — unflag</button>` : ""}
           <button type="button" class="secondary" id="cl-skip">Skip for now</button>
           <button type="button" class="secondary" id="cl-delete">Delete</button>
         </div>
@@ -1477,13 +2126,15 @@ function renderClassifyCurrent() {
     const unit = document.getElementById("cl-unit").value;
     if (!unit) { populateDatalist("cl-topic-list", []); return; }
     const topics = await fetchJSON(`/api/topics?subject=${encodeURIComponent(q.subject)}&unit=${encodeURIComponent(unit)}`);
+    if (classifyQueue[0] !== q) return; // the form moved on while this was loading
     populateDatalist("cl-topic-list", topics);
   }
   async function refreshClSubtopics() {
     const unit = document.getElementById("cl-unit").value;
-    const topic = document.getElementById("cl-topic").value.trim();
-    if (!unit || !topic) { populateDatalist("cl-subtopic-list", []); return; }
-    const subtopics = await fetchJSON(`/api/subtopics?subject=${encodeURIComponent(q.subject)}&unit=${encodeURIComponent(unit)}&topic=${encodeURIComponent(topic)}`);
+    const topics = topicParams(document.getElementById("cl-topic"));
+    if (!unit || !topics) { populateDatalist("cl-subtopic-list", []); return; }
+    const subtopics = await fetchJSON(`/api/subtopics?subject=${encodeURIComponent(q.subject)}&unit=${encodeURIComponent(unit)}${topics}`);
+    if (classifyQueue[0] !== q) return; // the form moved on while this was loading
     populateDatalist("cl-subtopic-list", subtopics);
   }
   document.getElementById("cl-unit").addEventListener("change", () => {
@@ -1495,7 +2146,6 @@ function renderClassifyCurrent() {
     // This matches how the original Chop form's unit handler behaves.
     populateDatalist("cl-subtopic-list", []);
   });
-  let clSubtopicTimer = null;
   document.getElementById("cl-topic").addEventListener("input", () => {
     clearTimeout(clSubtopicTimer);
     clSubtopicTimer = setTimeout(refreshClSubtopics, 250);
@@ -1503,21 +2153,45 @@ function renderClassifyCurrent() {
 
   document.getElementById("cl-save-next").addEventListener("click", saveClassifyCurrent);
   wireQuickTagButtons(area);
+  attachMultiSuggest(document.getElementById("cl-topic"));
+  attachMultiSuggest(document.getElementById("cl-subtopic"));
   document.getElementById("cl-skip").addEventListener("click", skipClassifyCurrent);
   document.getElementById("cl-delete").addEventListener("click", deleteClassifyCurrent);
+
+  if (classifyMode === "reclassify") {
+    document.getElementById("cl-unflag").addEventListener("click", unflagClassifyCurrent);
+    // Reclassify starts from what the question already has, not a blank form.
+    document.getElementById("cl-unit").value = q.unit || "";
+    document.getElementById("cl-topic").value = q.topics.join(", ");
+    document.getElementById("cl-subtopic").value = q.subtopics.join(", ");
+    document.getElementById("cl-tags").value = q.tags.join(", ");
+    document.getElementById("cl-notes").value = q.notes || "";
+    classifySelectedDifficulty = q.difficulty || null;
+    document.querySelectorAll("#cl-diff-buttons .diff-btn")
+      .forEach(b => b.classList.toggle("selected", b.dataset.diff === q.difficulty));
+    refreshClTopics();
+    // typing events refresh the suggestion chips and the scoped subtopic list
+    document.getElementById("cl-topic").dispatchEvent(new Event("input"));
+    document.getElementById("cl-subtopic").dispatchEvent(new Event("input"));
+  }
 }
 
 async function advanceClassifyQueue() {
   classifyQueue.shift();
   if (classifyQueue.length < 5) await loadMoreClassifyQueue();
   renderClassifyCurrent();
-  refreshUnclassifiedBadge();
+  refreshClassifyBadges();
 }
 
 async function saveClassifyCurrent() {
   const q = classifyQueue[0];
   const statusEl = document.getElementById("classify-status");
-  const topic = document.getElementById("cl-topic").value.trim();
+  // `q.topics` counts as "known" so a name containing a comma on this very
+  // question parses back to itself (matters when reclassifying).
+  const topics = parseMulti(document.getElementById("cl-topic").value,
+    [...datalistValues("cl-topic-list"), ...q.topics]);
+  const subtopics = parseMulti(document.getElementById("cl-subtopic").value,
+    [...datalistValues("cl-subtopic-list"), ...q.subtopics]);
   const unit = document.getElementById("cl-unit").value;
 
   if (!unit) {
@@ -1525,7 +2199,7 @@ async function saveClassifyCurrent() {
     statusEl.className = "status-msg err";
     return;
   }
-  if (!topic) {
+  if (!topics.length) {
     statusEl.textContent = "Topic is required.";
     statusEl.className = "status-msg err";
     return;
@@ -1548,13 +2222,36 @@ async function saveClassifyCurrent() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         unit: parseInt(unit, 10),
-        topic,
-        subtopic: document.getElementById("cl-subtopic").value.trim() || null,
+        // only what actually changed, so saving can never rewrite a
+        // classification you didn't touch
+        ...(sameList(topics, q.topics.map(t => t.trim())) ? {} : { topics }),
+        ...(sameList(subtopics, q.subtopics.map(t => t.trim())) ? {} : { subtopics }),
         question_number: document.getElementById("cl-number").value.trim() || null,
         difficulty: classifySelectedDifficulty,
         notes: document.getElementById("cl-notes").value.trim() || null,
         tags,
+        // saving from Reclassify resolves the flag
+        ...(classifyMode === "reclassify" ? { needs_review: false } : {}),
       }),
+    });
+    classifyRemaining = Math.max(0, classifyRemaining - 1);
+    await advanceClassifyQueue();
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+    statusEl.className = "status-msg err";
+  }
+}
+
+// Reviewed and it's fine as it is: clear the flag and leave the
+// classification exactly as it was.
+async function unflagClassifyCurrent() {
+  const q = classifyQueue[0];
+  const statusEl = document.getElementById("classify-status");
+  try {
+    await fetchJSON(`/api/questions/${q.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ needs_review: false }),
     });
     classifyRemaining = Math.max(0, classifyRemaining - 1);
     await advanceClassifyQueue();
@@ -1619,15 +2316,108 @@ function modalNav(delta) {
   renderModalQuestion();
 }
 
+// ---- Flag for review (viewer) ----
+function flagBannerHtml(q, withUnflag = false) {
+  return `<div class="flag-banner" id="flag-banner">
+      <span>⚑ Flagged for review${q.review_note ? " — " + escapeHtml(q.review_note) : ""}</span>
+      ${withUnflag ? `<button type="button" id="modal-edit-unflag" class="secondary small">Unflag</button>` : ""}
+    </div>`;
+}
+
+// Label follows the current question. Disabled while editing: flagging is
+// done from the viewer, and the Edit form has its own Unflag button.
+function updateModalFlagButton() {
+  const q = browseResultsCache[modalIndex];
+  if (!q) return;
+  const btn = document.getElementById("modal-flag");
+  btn.textContent = q.needs_review ? "⚑ Unflag" : "⚑ Flag";
+  btn.classList.toggle("flagged", !!q.needs_review);
+  btn.disabled = modalEditing;
+}
+
+async function patchModalFlag(fields) {
+  const q = browseResultsCache[modalIndex];
+  const updated = await fetchJSON(`/api/questions/${q.id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  browseResultsCache[modalIndex] = updated;
+  // refresh just this card behind the modal, and the tab counts
+  const card = document.getElementById(`q-card-${updated.id}`);
+  if (card) card.outerHTML = renderQuestionCard(updated);
+  refreshClassifyBadges();
+  return updated;
+}
+
+function showFlagPanel() {
+  if (document.getElementById("flag-panel")) return;
+  const panel = document.createElement("div");
+  panel.id = "flag-panel";
+  panel.className = "flag-panel";
+  panel.innerHTML = `
+    <input type="text" id="flag-note" maxlength="300" placeholder="Why? (optional) e.g. difficulty looks wrong">
+    <button type="button" id="flag-confirm">Flag for review</button>
+    <button type="button" id="flag-cancel" class="secondary">Cancel</button>
+    <div id="flag-status" class="status-msg err" style="width:100%;"></div>
+  `;
+  document.getElementById("modal-body").prepend(panel);
+  const note = document.getElementById("flag-note");
+  note.focus();
+
+  async function submit() {
+    try {
+      await patchModalFlag({ needs_review: true, review_note: note.value.trim() || null });
+      renderModalQuestion();
+    } catch (err) {
+      document.getElementById("flag-status").textContent = "Error: " + err.message;
+    }
+  }
+  document.getElementById("flag-confirm").addEventListener("click", submit);
+  document.getElementById("flag-cancel").addEventListener("click", () => panel.remove());
+  note.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); submit(); }
+    if (e.key === "Escape") { e.stopPropagation(); panel.remove(); } // cancel the panel, not the whole viewer
+  });
+}
+
+document.getElementById("modal-flag").addEventListener("click", async () => {
+  const q = browseResultsCache[modalIndex];
+  if (!q || modalEditing) return;
+  if (!q.needs_review) { showFlagPanel(); return; }
+  try {
+    await patchModalFlag({ needs_review: false });
+    renderModalQuestion();
+  } catch (err) {
+    alert("Couldn't unflag: " + err.message);
+  }
+});
+
+// Unflag from inside the Edit form. Deliberately does NOT re-render the form,
+// which would throw away whatever has been typed but not saved yet.
+async function unflagFromEditForm() {
+  try {
+    await patchModalFlag({ needs_review: false });
+    const banner = document.getElementById("flag-banner");
+    if (banner) banner.remove();
+    updateModalFlagButton();
+  } catch (err) {
+    const statusEl = document.getElementById("modal-edit-status");
+    statusEl.textContent = "Error: " + err.message;
+    statusEl.className = "status-msg err";
+  }
+}
+
 function renderModalQuestion() {
   const q = browseResultsCache[modalIndex];
   if (!q) return;
 
   document.getElementById("modal-position").textContent = `${modalIndex + 1} / ${browseResultsCache.length}`;
   document.getElementById("modal-meta").textContent =
-    `${q.school} · ${q.subject}${q.unit ? " · Unit " + q.unit : ""}${q.topic ? " · " + q.topic : ""}${q.subtopic ? " · " + q.subtopic : ""}`;
+    `${q.school} · ${q.subject}${q.unit ? " · Unit " + q.unit : ""}${q.topics.length ? " · " + q.topics.join(", ") : ""}${q.subtopics.length ? " · " + q.subtopics.join(", ") : ""}`;
   document.getElementById("modal-prev").disabled = modalIndex === 0;
   document.getElementById("modal-next").disabled = modalIndex === browseResultsCache.length - 1;
+  updateModalFlagButton();
 
   if (modalEditing) {
     renderModalEditForm(q);
@@ -1645,6 +2435,7 @@ function renderModalViewBody(q) {
   `).join("");
 
   document.getElementById("modal-body").innerHTML = `
+    ${q.needs_review ? flagBannerHtml(q) : ""}
     <div class="modal-question-meta">
       <span class="diff-tag ${q.difficulty}">${q.difficulty}</span>
       ${q.question_number ? `<span class="muted">Question ${escapeHtml(q.question_number)}</span>` : ""}
@@ -1667,6 +2458,7 @@ function renderModalEditForm(q) {
 
   document.getElementById("modal-body").innerHTML = `
     <div id="modal-edit-form">
+      ${q.needs_review ? flagBannerHtml(q, true) : ""}
       <label>Unit
         <select id="modal-edit-unit">
           <option value="">Choose a unit</option>
@@ -1677,13 +2469,13 @@ function renderModalEditForm(q) {
         </select>
       </label>
 
-      <label>Topic
-        <input type="text" id="modal-edit-topic" list="modal-edit-topic-list">
+      <label>Topic (comma separated)
+        <input type="text" id="modal-edit-topic" data-suggest-from="modal-edit-topic-list">
         <datalist id="modal-edit-topic-list"></datalist>
       </label>
 
-      <label>Subtopic (optional)
-        <input type="text" id="modal-edit-subtopic" list="modal-edit-subtopic-list">
+      <label>Subtopic (optional, comma separated)
+        <input type="text" id="modal-edit-subtopic" data-suggest-from="modal-edit-subtopic-list">
         <datalist id="modal-edit-subtopic-list"></datalist>
       </label>
 
@@ -1716,14 +2508,18 @@ function renderModalEditForm(q) {
   `;
 
   document.getElementById("modal-edit-unit").value = q.unit || "";
-  document.getElementById("modal-edit-topic").value = q.topic || "";
-  document.getElementById("modal-edit-subtopic").value = q.subtopic || "";
+  document.getElementById("modal-edit-topic").value = q.topics.join(", ");
+  document.getElementById("modal-edit-subtopic").value = q.subtopics.join(", ");
   document.getElementById("modal-edit-number").value = q.question_number || "";
   document.getElementById("modal-edit-tags").value = q.tags.join(", ");
   document.getElementById("modal-edit-notes").value = q.notes || "";
 
   const form = document.getElementById("modal-edit-form");
   wireQuickTagButtons(form);
+  attachMultiSuggest(document.getElementById("modal-edit-topic"));
+  attachMultiSuggest(document.getElementById("modal-edit-subtopic"));
+  const unflagBtn = document.getElementById("modal-edit-unflag");
+  if (unflagBtn) unflagBtn.addEventListener("click", unflagFromEditForm);
   form.querySelectorAll(".diff-btn").forEach(btn => {
     if (btn.dataset.diff === q.difficulty) btn.classList.add("selected");
     btn.addEventListener("click", () => {
@@ -1744,9 +2540,9 @@ function renderModalEditForm(q) {
   }
   async function refreshEditSubtopics() {
     const unit = document.getElementById("modal-edit-unit").value;
-    const topic = document.getElementById("modal-edit-topic").value.trim();
-    if (!unit || !topic) { populateDatalist("modal-edit-subtopic-list", []); return; }
-    const subtopics = await fetchJSON(`/api/subtopics?subject=${encodeURIComponent(q.subject)}&unit=${encodeURIComponent(unit)}&topic=${encodeURIComponent(topic)}`);
+    const topics = topicParams(document.getElementById("modal-edit-topic"), q.topics);
+    if (!unit || !topics) { populateDatalist("modal-edit-subtopic-list", []); return; }
+    const subtopics = await fetchJSON(`/api/subtopics?subject=${encodeURIComponent(q.subject)}&unit=${encodeURIComponent(unit)}${topics}`);
     populateDatalist("modal-edit-subtopic-list", subtopics);
   }
   document.getElementById("modal-edit-unit").addEventListener("change", () => {
@@ -1771,10 +2567,15 @@ function renderModalEditForm(q) {
 async function saveModalEdit() {
   const q = browseResultsCache[modalIndex];
   const statusEl = document.getElementById("modal-edit-status");
-  const topic = document.getElementById("modal-edit-topic").value.trim();
+  // `q.topics` is passed as "known" so a name that contains a comma on this
+  // very question always parses back to itself, never split in two.
+  const topics = parseMulti(document.getElementById("modal-edit-topic").value,
+    [...datalistValues("modal-edit-topic-list"), ...q.topics]);
+  const subtopics = parseMulti(document.getElementById("modal-edit-subtopic").value,
+    [...datalistValues("modal-edit-subtopic-list"), ...q.subtopics]);
   const unit = document.getElementById("modal-edit-unit").value;
 
-  if (!topic) {
+  if (!topics.length) {
     statusEl.textContent = "Topic is required.";
     statusEl.className = "status-msg err";
     return;
@@ -1797,8 +2598,11 @@ async function saveModalEdit() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         unit: unit ? parseInt(unit, 10) : null,
-        topic,
-        subtopic: document.getElementById("modal-edit-subtopic").value.trim() || null,
+        // Only send topics/subtopics that actually changed, so saving an
+        // unrelated edit (say, difficulty) can never touch how an existing
+        // question is classified.
+        ...(sameList(topics, q.topics.map(t => t.trim())) ? {} : { topics }),
+        ...(sameList(subtopics, q.subtopics.map(t => t.trim())) ? {} : { subtopics }),
         question_number: document.getElementById("modal-edit-number").value.trim() || null,
         difficulty: modalEditDifficulty,
         notes: document.getElementById("modal-edit-notes").value.trim() || null,
@@ -1903,12 +2707,14 @@ async function deleteQuestionFromModal() {
   await fetchJSON(`/api/questions/${q.id}`, { method: "DELETE" });
   closeQuestionModal();
   refreshBrowse();
+  refreshClassifyBadges(); // it may have been unclassified or flagged
 }
 
 async function deleteQuestion(id) {
   if (!confirm("Delete this question?")) return;
   await fetchJSON(`/api/questions/${id}`, { method: "DELETE" });
   refreshBrowse();
+  refreshClassifyBadges(); // it may have been unclassified or flagged
 }
 
 document.getElementById("modal-close").addEventListener("click", closeQuestionModal);
@@ -1923,8 +2729,11 @@ document.getElementById("modal-edit").addEventListener("click", () => {
 
 document.addEventListener("keydown", (e) => {
   if (document.getElementById("question-modal").style.display === "none") return;
-  if (e.key === "ArrowLeft") modalNav(-1);
-  if (e.key === "ArrowRight") modalNav(1);
+  // ← / → move the text cursor inside a field (or change a dropdown): they must
+  // not also flip to another question and throw away an in-progress edit.
+  const typing = e.target.matches && e.target.matches("input, textarea, select");
+  if (e.key === "ArrowLeft" && !typing) modalNav(-1);
+  if (e.key === "ArrowRight" && !typing) modalNav(1);
   if (e.key === "Escape") closeQuestionModal();
 });
 
@@ -1942,7 +2751,9 @@ window.removeAnswerImage = removeAnswerImage;
 
 loadDropdownData();
 refreshBrowse();
-refreshUnclassifiedBadge();
+refreshClassifyBadges();
 
 document.getElementById("q-quick-tags").innerHTML = quickTagButtonsHtml("q-tags");
 wireQuickTagButtons(document.getElementById("q-quick-tags"));
+attachMultiSuggest(document.getElementById("q-topic"));
+attachMultiSuggest(document.getElementById("q-subtopic"));

@@ -110,15 +110,18 @@
 
     <div class="quick-add-box">
       <h3>Quick add a circulating question/screenshot</h3>
-      <p class="hint">For a one-off question that isn't from a specific paper you're tracking -- skips the usual details and goes straight to chopping.</p>
+      <p class="hint">For one-off questions that aren't from a paper you're tracking. Pick or paste one or several screenshots and each becomes a question that goes straight to the Classify tab -- no chopping needed. Tick "Trim first" only if a screenshot needs cropping. A PDF opens in Chop as before.</p>
       <form id="quick-add-form">
         <label>Subject
           <input list="subject-list" id="qa-subject" required>
         </label>
-        <label>Image or file
-          <input type="file" id="qa-file" accept=".pdf,.doc,.docx,.png,.jpg,.jpeg" required>
+        <label>Screenshots or a PDF
+          <input type="file" id="qa-file" accept=".pdf,.png,.jpg,.jpeg" multiple>
         </label>
-        <button type="submit">Add &amp; start chopping</button>
+        <div class="paste-zone" id="qa-paste">Or paste a screenshot from your clipboard: press <b>Ctrl+V</b> (<b>&#8984;V</b> on a Mac) anywhere on this tab</div>
+        <div class="qa-queue" id="qa-queue"></div>
+        <label class="qa-trim"><input type="checkbox" id="qa-trim"> Trim first (opens each screenshot in Chop so you can crop it)</label>
+        <button type="submit" id="qa-submit">Add</button>
       </form>
       <div id="quick-add-status" class="status-msg"></div>
     </div>
@@ -155,6 +158,11 @@
           <button id="zoom-in" aria-label="Zoom in">+</button>
           <button id="zoom-fit" class="secondary">Fit</button>
         </div>
+        <div class="chop-session" id="chop-session" style="display:none;">
+          <button type="button" id="session-prev" class="secondary small">&lsaquo; Prev</button>
+          <span id="session-label" class="muted"></span>
+          <button type="button" id="session-next" class="small">Next &rsaquo;</button>
+        </div>
       </div>
 
       <div class="chop-mode-switch" id="chop-mode-switch" style="display:none;">
@@ -190,13 +198,13 @@
             </select>
           </label>
 
-          <label>Topic
-            <input list="topic-list" id="q-topic" required>
+          <label>Topic (comma separated)
+            <input type="text" id="q-topic" data-suggest-from="topic-list" required>
             <datalist id="topic-list"></datalist>
           </label>
 
-          <label>Subtopic (optional)
-            <input type="text" id="q-subtopic" list="subtopic-list">
+          <label>Subtopic (optional, comma separated)
+            <input type="text" id="q-subtopic" data-suggest-from="subtopic-list">
             <datalist id="subtopic-list"></datalist>
           </label>
 
@@ -242,12 +250,17 @@
 
   <!-- ===================== CLASSIFY TAB ===================== -->
   <section id="tab-classify" class="tab-panel">
+    <!-- Own class (not .mode-btn): the Chop tab attaches its mode logic to every .mode-btn on the page -->
+    <div class="chop-mode-switch" id="classify-mode-switch">
+      <button type="button" class="classify-mode-btn active" id="cl-mode-classify" data-mode="classify">Classify</button>
+      <button type="button" class="classify-mode-btn" id="cl-mode-reclassify" data-mode="reclassify">Reclassify</button>
+    </div>
     <div class="classify-toolbar">
-      <h2 style="margin:0;">Classify</h2>
+      <h2 style="margin:0;" id="classify-title">Classify</h2>
       <select id="classify-subject-filter"><option value="">All subjects</option></select>
       <span id="classify-remaining" class="muted"></span>
     </div>
-    <p class="hint">Questions chopped with "Quick save (classify later)" on the Chop tab show up here, one at a time, so you can sort through a whole backlog quickly without re-opening a picker each time.</p>
+    <p class="hint" id="classify-hint"></p>
     <div id="classify-area"></div>
   </section>
 
@@ -278,6 +291,7 @@
       <span id="modal-meta"></span>
     </div>
     <button id="modal-delete" class="secondary">Delete</button>
+    <button id="modal-flag" class="secondary">⚑ Flag</button>
     <button id="modal-edit" class="secondary">Edit</button>
   </div>
   <button id="modal-prev" class="modal-nav-arrow modal-nav-prev" aria-label="Previous question">&lsaquo;</button>

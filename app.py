@@ -4,6 +4,7 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import joinedload, selectinload
 from werkzeug.utils import secure_filename
+from werkzeug.datastructures import MultiDict
 from datetime import datetime
 import os
 import uuid
@@ -40,6 +41,7 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
 
 
 ALLOWED_EXTENSIONS = {"pdf", "doc", "docx", "png", "jpg", "jpeg"}
+IMAGE_EXTENSIONS = {"png", "jpg", "jpeg"}
 FILES_DIR = os.path.join(DATA_DIR, "files")
 
 
@@ -97,6 +99,12 @@ class Paper(db.Model):
     solution_file_path = db.Column(db.String(300), nullable=True)
     date_added = db.Column(db.DateTime, default=datetime.utcnow)
 
+    # A per-subject "Screenshots" container: screenshots added with Quick Add
+    # become questions directly and all hang off this one paper, instead of
+    # each creating a paper of its own. It has no original file (file_path is
+    # ""), so it's kept out of the paper lists and the Chop picker.
+    is_collection = db.Column(db.Boolean, nullable=False, default=False, server_default=db.text("0"))
+
     questions = db.relationship("Question", backref="paper", cascade="all, delete-orphan")
 
     def to_dict(self):
@@ -109,6 +117,7 @@ class Paper(db.Model):
             "exam_year": self.exam_year,
             "file_path": self.file_path,
             "solution_file_path": self.solution_file_path,
+            "is_collection": bool(self.is_collection),
         }
 
 
@@ -138,7 +147,27 @@ class Question(db.Model):
     notes = db.Column(db.Text, nullable=True)
     date_added = db.Column(db.DateTime, default=datetime.utcnow)
 
+    # "Flag for review": set from the viewer when a question's classification
+    # looks wrong; flagged questions show up in the Classify tab's Reclassify
+    # queue until they're fixed or unflagged. The note (why it was flagged) is
+    # only kept while flagged. server_default so an older version of the app,
+    # which doesn't know this column, can still insert rows.
+    needs_review = db.Column(db.Boolean, nullable=False, default=False, server_default=db.text("0"))
+    review_note = db.Column(db.Text, nullable=True)
+
     tags = db.relationship("Tag", secondary=question_tags, backref="questions")
+
+    # A question can carry several topics and subtopics (typed comma-separated,
+    # like tags). The full lists live in these link tables; `topic` and
+    # `subtopic` above stay in place as the FIRST entry of each list, kept in
+    # sync by set_topics() -- so every older question (and anything that still
+    # reads the single-value columns, incl. is_classified) works untouched.
+    topic_links = db.relationship(
+        "QuestionTopic", cascade="all, delete-orphan", order_by="QuestionTopic.position",
+    )
+    subtopic_links = db.relationship(
+        "QuestionSubtopic", cascade="all, delete-orphan", order_by="QuestionSubtopic.position",
+    )
 
     # A question (or its worked solution) can span several pages/regions --
     # each chopped box, or each manually-uploaded solution page, becomes one
@@ -159,6 +188,11 @@ class Question(db.Model):
             "unit": self.unit,
             "topic": self.topic,
             "subtopic": self.subtopic,
+            # Full lists. `topic`/`subtopic` above remain the first entry, as
+            # before. The fallback keeps a row that somehow has no link rows
+            # yet (e.g. created by an older version) reading correctly.
+            "topics": [l.name for l in self.topic_links] or ([self.topic] if self.topic else []),
+            "subtopics": [l.name for l in self.subtopic_links] or ([self.subtopic] if self.subtopic else []),
             "difficulty": self.difficulty,
             "page_number": self.page_number,
             "notes": self.notes,
@@ -170,6 +204,8 @@ class Question(db.Model):
             # to build its queue, and what the Browse/Chop UI uses to show
             # an "unclassified" flag on a card.
             "is_classified": bool(self.topic) and bool(self.difficulty),
+            "needs_review": bool(self.needs_review),
+            "review_note": self.review_note,
             "tags": [t.name for t in self.tags],
             "school": self.paper.school,
             "subject": self.paper.subject,
@@ -200,6 +236,68 @@ class QuestionImage(db.Model):
             "file_path": self.file_path,
             "order_index": self.order_index,
         }
+
+
+class QuestionTopic(db.Model):
+    """One topic on a question. `position` 0 is the primary topic, which is
+    also mirrored into questions.topic."""
+    __tablename__ = "question_topics"
+    id = db.Column(db.Integer, primary_key=True)
+    question_id = db.Column(db.Integer, db.ForeignKey("questions.id"), nullable=False)
+    name = db.Column(db.String(120), nullable=False)
+    position = db.Column(db.Integer, nullable=False, default=0)
+
+
+class QuestionSubtopic(db.Model):
+    """One subtopic on a question -- same shape as QuestionTopic."""
+    __tablename__ = "question_subtopics"
+    id = db.Column(db.Integer, primary_key=True)
+    question_id = db.Column(db.Integer, db.ForeignKey("questions.id"), nullable=False)
+    name = db.Column(db.String(120), nullable=False)
+    position = db.Column(db.Integer, nullable=False, default=0)
+
+
+def clean_names(raw):
+    """Trims, drops blanks and non-strings, and de-duplicates (case-insensitive,
+    first spelling wins) while keeping order -- the first item is the primary."""
+    out, seen = [], set()
+    for item in raw or []:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            out.append(name)
+    return out
+
+
+def names_from_payload(data, plural, singular):
+    """Reads a topic/subtopic list from a request body. Accepts the list form
+    (`topics: [...]`) or the original single-value form (`topic: "..."`).
+    A single string is ALWAYS one item and is never split on commas, because
+    real topic names can contain commas ("Thermal, nuclear and electrical
+    physics") -- splitting typed text into separate topics is the client's
+    job. Returns None when neither key was sent (= leave it alone)."""
+    if plural in data:
+        value = data[plural]
+        return clean_names(value if isinstance(value, list) else [value])
+    if singular in data:
+        return clean_names([data[singular]])
+    return None
+
+
+def set_topics(question, topics=None, subtopics=None):
+    """The one place topics/subtopics get written. Updates the link rows AND
+    the legacy single-value columns together so they can never disagree.
+    Pass None to leave a list untouched."""
+    if topics is not None:
+        if topics != [l.name for l in question.topic_links]:
+            question.topic_links = [QuestionTopic(name=n, position=i) for i, n in enumerate(topics)]
+        question.topic = topics[0] if topics else ""
+    if subtopics is not None:
+        if subtopics != [l.name for l in question.subtopic_links]:
+            question.subtopic_links = [QuestionSubtopic(name=n, position=i) for i, n in enumerate(subtopics)]
+        question.subtopic = subtopics[0] if subtopics else None
 
 
 # ---------- Routes ----------
@@ -295,7 +393,16 @@ def download_backup():
 @app.route("/api/papers", methods=["GET"])
 def list_papers():
     papers = Paper.query.order_by(Paper.date_added.desc()).all()
-    return jsonify([p.to_dict() for p in papers])
+    # How many questions were chopped from each paper, in one query -- lets the
+    # UI show which screenshots are unused and warn before deleting ones that
+    # aren't.
+    counts = dict(db.session.query(Question.paper_id, db.func.count(Question.id)).group_by(Question.paper_id).all())
+    out = []
+    for p in papers:
+        d = p.to_dict()
+        d["question_count"] = counts.get(p.id, 0)
+        out.append(d)
+    return jsonify(out)
 
 
 @app.route("/api/papers", methods=["POST"])
@@ -389,6 +496,87 @@ def create_paper_quick():
     return jsonify(paper.to_dict()), 201
 
 
+def get_or_create_collection(subject):
+    """The one hidden "Screenshots" paper for a subject (created on first use).
+    Returns (paper, created). Only flushes -- the caller commits."""
+    paper = Paper.query.filter_by(is_collection=True, subject=subject).first()
+    if paper:
+        return paper, False
+    paper = Paper(
+        school=QUICK_ADD_SCHOOL,
+        subject=subject,
+        year_level=QUICK_ADD_YEAR_LEVEL,
+        exam_type=QUICK_ADD_EXAM_TYPE,
+        exam_year=None,
+        file_path="",
+        solution_file_path=None,
+        is_collection=True,
+    )
+    db.session.add(paper)
+    db.session.flush()
+    return paper, True
+
+
+@app.route("/api/papers/collection", methods=["POST"])
+def get_collection_paper():
+    """Returns (creating it if needed) the subject's hidden Screenshots
+    paper. Used when trimming freshly-picked screenshots in Chop, where the
+    trimmed crops need a paper to belong to but the untrimmed originals aren't
+    stored. Expects JSON: { "subject": "Physics" }."""
+    subject = ((request.get_json() or {}).get("subject") or "").strip()
+    if not subject:
+        return jsonify({"error": "subject is required"}), 400
+    paper, created = get_or_create_collection(subject)
+    db.session.commit()
+    return jsonify(paper.to_dict()), 201 if created else 200
+
+
+@app.route("/api/screenshots", methods=["POST"])
+def add_screenshots():
+    """Bulk quick-add: each PNG/JPG becomes an unclassified question directly
+    (it lands in the Classify queue) -- no paper per screenshot, no chopping.
+    All of a subject's screenshots share one hidden collection paper.
+    Expects multipart/form-data: subject, and one or more `file` parts.
+    Files that aren't PNG/JPG are skipped and reported, not fatal."""
+    subject = (request.form.get("subject") or "").strip()
+    if not subject:
+        return jsonify({"error": "subject is required"}), 400
+    files = [f for f in request.files.getlist("file") if f and f.filename]
+    if not files:
+        return jsonify({"error": "at least one image file is required"}), 400
+
+    paper, _ = get_or_create_collection(subject)
+    created, skipped = [], []
+    for f in files:
+        secured = secure_filename(f.filename)
+        ext = secured.rsplit(".", 1)[1].lower() if "." in secured else ""
+        if ext not in IMAGE_EXTENSIONS:
+            skipped.append({"filename": f.filename, "error": "only PNG or JPG images can be added this way"})
+            continue
+        path = save_upload(f, subfolder=os.path.join("crops", secure_filename(subject)))
+        question = Question(
+            paper_id=paper.id, question_number=None, unit=None,
+            topic="", subtopic=None, difficulty="", page_number=None, notes=None,
+        )
+        db.session.add(question)
+        db.session.flush()
+        db.session.add(QuestionImage(
+            question_id=question.id, kind="question", page_number=None,
+            file_path=path, order_index=0,
+        ))
+        created.append(question)
+
+    if not created:
+        db.session.rollback()  # also drops a collection paper that was only just created
+        return jsonify({"error": "no usable images (PNG or JPG only)", "skipped": skipped}), 400
+    db.session.commit()
+    return jsonify({
+        "paper": paper.to_dict(),
+        "created": [q.to_dict() for q in created],
+        "skipped": skipped,
+    }), 201
+
+
 @app.route("/api/papers/<int:paper_id>", methods=["PATCH"])
 def update_paper(paper_id):
     """Partial update for a paper's metadata (school, subject, year_level,
@@ -460,9 +648,9 @@ def build_question_query(args):
     if units:
         query = query.filter(Question.unit.in_([int(u) for u in units]))
     if topics:
-        query = query.filter(Question.topic.in_(topics))
+        query = query.filter(Question.topic_links.any(QuestionTopic.name.in_(topics)))
     if subtopics:
-        query = query.filter(Question.subtopic.in_(subtopics))
+        query = query.filter(Question.subtopic_links.any(QuestionSubtopic.name.in_(subtopics)))
     if difficulties:
         query = query.filter(Question.difficulty.in_([d.upper() for d in difficulties]))
     if exam_type:
@@ -484,6 +672,9 @@ def build_question_query(args):
                 Question.difficulty.is_(None), Question.difficulty == "",
             )
         )
+
+    if args.get("needs_review"):
+        query = query.filter(Question.needs_review.is_(True))
 
     # Each required tag becomes its own EXISTS clause -- chaining several
     # .filter() calls on the same relationship is how you AND them (a
@@ -536,6 +727,8 @@ def list_questions():
             joinedload(Question.paper),
             selectinload(Question.tags),
             selectinload(Question.images),
+            selectinload(Question.topic_links),
+            selectinload(Question.subtopic_links),
         )
         .order_by(Question.id.desc())
         .offset((page - 1) * per_page)
@@ -552,6 +745,18 @@ def list_questions():
     })
 
 
+@app.route("/api/classify-counts", methods=["GET"])
+def classify_counts():
+    """The two numbers on the Classify tab's badges -- still to classify, and
+    flagged for review -- in one round trip. Built from the same filters as
+    /api/questions?unclassified=1 and ?needs_review=1, so they can't disagree
+    with what those queues actually contain."""
+    return jsonify({
+        "unclassified": build_question_query(MultiDict({"unclassified": "1"})).order_by(None).count(),
+        "needs_review": build_question_query(MultiDict({"needs_review": "1"})).order_by(None).count(),
+    })
+
+
 @app.route("/api/questions", methods=["POST"])
 def create_question():
     """
@@ -560,8 +765,8 @@ def create_question():
       "paper_id": 1,
       "question_number": "4b",
       "unit": 3,
-      "topic": "Calculus",
-      "subtopic": "Related rates",
+      "topics": ["Calculus", "Probability"],      (or the older "topic": "Calculus")
+      "subtopics": ["Related rates"],             (or the older "subtopic": "...")
       "difficulty": "CU",
       "page_number": 3,
       "notes": "...",
@@ -570,7 +775,8 @@ def create_question():
     Cropped image upload happens via a separate endpoint (see /api/questions/<id>/crop).
     """
     data = request.get_json()
-    if not data or not data.get("paper_id") or not data.get("topic") or not data.get("difficulty"):
+    topics = names_from_payload(data, "topics", "topic") if data else None
+    if not data or not data.get("paper_id") or not topics or not data.get("difficulty"):
         return jsonify({"error": "paper_id, topic, and difficulty are required"}), 400
 
     paper = Paper.query.get(data["paper_id"])
@@ -588,12 +794,13 @@ def create_question():
         paper_id=paper.id,
         question_number=normalize_question_number(data.get("question_number")),
         unit=int(unit) if unit is not None else None,
-        topic=data["topic"],
-        subtopic=data.get("subtopic"),
+        topic=topics[0],
+        subtopic=None,
         difficulty=data["difficulty"].upper(),
         page_number=data.get("page_number"),
         notes=data.get("notes"),
     )
+    set_topics(question, topics, names_from_payload(data, "subtopics", "subtopic") or [])
 
     tag_names = data.get("tags", [])
     for name in tag_names:
@@ -662,9 +869,25 @@ def update_question(question_id):
     question = Question.query.get_or_404(question_id)
     data = request.get_json() or {}
 
-    for field in ["topic", "subtopic", "notes", "page_number"]:
+    for field in ["notes", "page_number"]:
         if field in data:
             setattr(question, field, data[field])
+
+    set_topics(
+        question,
+        names_from_payload(data, "topics", "topic"),
+        names_from_payload(data, "subtopics", "subtopic"),
+    )
+
+    # Flag for review. The note only lives while the question is flagged:
+    # unflagging (or sending a note for an unflagged question) clears it.
+    if "review_note" in data:
+        note = data["review_note"]
+        question.review_note = (note.strip() or None) if isinstance(note, str) else None
+    if "needs_review" in data:
+        question.needs_review = bool(data["needs_review"])
+    if not question.needs_review:
+        question.review_note = None
 
     if "question_number" in data:
         question.question_number = normalize_question_number(data["question_number"])
@@ -809,7 +1032,9 @@ def list_topics():
     as before."""
     subject = request.args.get("subject")
     units = request.args.getlist("unit")
-    query = db.session.query(Question.topic).join(Paper).distinct()
+    query = db.session.query(QuestionTopic.name) \
+        .join(Question, QuestionTopic.question_id == Question.id) \
+        .join(Paper, Question.paper_id == Paper.id).distinct()
     if subject:
         query = query.filter(Paper.subject == subject)
     if units:
@@ -826,14 +1051,15 @@ def list_subtopics():
     subject = request.args.get("subject")
     units = request.args.getlist("unit")
     topics = request.args.getlist("topic")
-    query = db.session.query(Question.subtopic).join(Paper) \
-        .filter(Question.subtopic.isnot(None)).distinct()
+    query = db.session.query(QuestionSubtopic.name) \
+        .join(Question, QuestionSubtopic.question_id == Question.id) \
+        .join(Paper, Question.paper_id == Paper.id).distinct()
     if subject:
         query = query.filter(Paper.subject == subject)
     if units:
         query = query.filter(Question.unit.in_([int(u) for u in units]))
     if topics:
-        query = query.filter(Question.topic.in_(topics))
+        query = query.filter(Question.topic_links.any(QuestionTopic.name.in_(topics)))
     return jsonify(sorted([s[0] for s in query.all() if s[0]]))
 
 
@@ -881,6 +1107,27 @@ if __name__ == "__main__":
             # syllabus content having moved between units. Use "Edit" on
             # a question in the full-screen viewer to set it retroactively,
             # question by question, without re-uploading anything.
+
+        # Flag-for-review columns. ADD COLUMN with a constant default doesn't
+        # rewrite the table or touch any existing row -- every existing question
+        # just reads as "not flagged". NOT NULL DEFAULT 0 also lets an older
+        # version of the app (which doesn't know the column) keep inserting
+        # rows. These must exist before the first ORM query of Question below.
+        if "needs_review" not in existing_cols:
+            with db.engine.begin() as conn:
+                conn.execute(db.text("ALTER TABLE questions ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0"))
+            existing_cols.add("needs_review")
+        if "review_note" not in existing_cols:
+            with db.engine.begin() as conn:
+                conn.execute(db.text("ALTER TABLE questions ADD COLUMN review_note TEXT"))
+            existing_cols.add("review_note")
+
+        # Screenshots-collection flag on papers -- same safe pattern: a constant
+        # default means every existing paper simply reads as "not a collection".
+        paper_cols = {c["name"] for c in inspector.get_columns("papers")}
+        if "is_collection" not in paper_cols:
+            with db.engine.begin() as conn:
+                conn.execute(db.text("ALTER TABLE papers ADD COLUMN is_collection INTEGER NOT NULL DEFAULT 0"))
 
         # Multi-page support: question/answer images now live in their own
         # question_images table (one question can have several page crops)
@@ -933,6 +1180,33 @@ if __name__ == "__main__":
         if changed:
             db.session.commit()
 
+        # Multi-topic support. db.create_all() above has already created the
+        # question_topics / question_subtopics tables (empty). This copies each
+        # EXISTING question's single topic/subtopic in as its first list entry.
+        # It only ever INSERTs into the new tables -- the questions table and
+        # its columns are never modified -- and it's safe to re-run every
+        # start-up: a question is only backfilled if it has no rows yet.
+        # An older version of the app (which only knows the single-value
+        # columns) may have edited or deleted questions since, so first drop
+        # link rows whose question is gone, and after the backfill realign
+        # the first entry of any question whose column was changed.
+        with db.engine.begin() as conn:
+            for table, column in (("question_topics", "topic"), ("question_subtopics", "subtopic")):
+                conn.execute(db.text(f"DELETE FROM {table} WHERE question_id NOT IN (SELECT id FROM questions)"))
+                conn.execute(db.text(f"""
+                    INSERT INTO {table} (question_id, name, position)
+                    SELECT q.id, q.{column}, 0 FROM questions q
+                    WHERE q.{column} IS NOT NULL AND TRIM(q.{column}) != ''
+                      AND NOT EXISTS (SELECT 1 FROM {table} l WHERE l.question_id = q.id)
+                """))
+                conn.execute(db.text(f"""
+                    UPDATE {table}
+                    SET name = (SELECT q.{column} FROM questions q WHERE q.id = {table}.question_id)
+                    WHERE position = 0
+                      AND (SELECT TRIM(q.{column}) FROM questions q WHERE q.id = {table}.question_id) != ''
+                      AND name != (SELECT q.{column} FROM questions q WHERE q.id = {table}.question_id)
+                """))
+
         # Indexes for the columns Browse actually filters/joins on. Safe to
         # add on top of an existing database with data already in it --
         # CREATE INDEX IF NOT EXISTS only builds a lookup structure
@@ -949,6 +1223,11 @@ if __name__ == "__main__":
             conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_question_difficulty ON questions(difficulty)"))
             conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_question_unit ON questions(unit)"))
             conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_qimage_question_id ON question_images(question_id)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_qtopic_name ON question_topics(name)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_qtopic_question_id ON question_topics(question_id)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_qsubtopic_name ON question_subtopics(name)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_qsubtopic_question_id ON question_subtopics(question_id)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_question_needs_review ON questions(needs_review)"))
     # debug=False: this runs permanently as a systemd service, not a dev
     # session -- the debug reloader can restart mid-request on a file
     # change, and the debugger's error page allows running arbitrary code
