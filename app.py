@@ -41,6 +41,7 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
 
 
 ALLOWED_EXTENSIONS = {"pdf", "doc", "docx", "png", "jpg", "jpeg"}
+IMAGE_EXTENSIONS = {"png", "jpg", "jpeg"}
 FILES_DIR = os.path.join(DATA_DIR, "files")
 
 
@@ -98,6 +99,12 @@ class Paper(db.Model):
     solution_file_path = db.Column(db.String(300), nullable=True)
     date_added = db.Column(db.DateTime, default=datetime.utcnow)
 
+    # A per-subject "Screenshots" container: screenshots added with Quick Add
+    # become questions directly and all hang off this one paper, instead of
+    # each creating a paper of its own. It has no original file (file_path is
+    # ""), so it's kept out of the paper lists and the Chop picker.
+    is_collection = db.Column(db.Boolean, nullable=False, default=False, server_default=db.text("0"))
+
     questions = db.relationship("Question", backref="paper", cascade="all, delete-orphan")
 
     def to_dict(self):
@@ -110,6 +117,7 @@ class Paper(db.Model):
             "exam_year": self.exam_year,
             "file_path": self.file_path,
             "solution_file_path": self.solution_file_path,
+            "is_collection": bool(self.is_collection),
         }
 
 
@@ -385,7 +393,16 @@ def download_backup():
 @app.route("/api/papers", methods=["GET"])
 def list_papers():
     papers = Paper.query.order_by(Paper.date_added.desc()).all()
-    return jsonify([p.to_dict() for p in papers])
+    # How many questions were chopped from each paper, in one query -- lets the
+    # UI show which screenshots are unused and warn before deleting ones that
+    # aren't.
+    counts = dict(db.session.query(Question.paper_id, db.func.count(Question.id)).group_by(Question.paper_id).all())
+    out = []
+    for p in papers:
+        d = p.to_dict()
+        d["question_count"] = counts.get(p.id, 0)
+        out.append(d)
+    return jsonify(out)
 
 
 @app.route("/api/papers", methods=["POST"])
@@ -477,6 +494,87 @@ def create_paper_quick():
     db.session.add(paper)
     db.session.commit()
     return jsonify(paper.to_dict()), 201
+
+
+def get_or_create_collection(subject):
+    """The one hidden "Screenshots" paper for a subject (created on first use).
+    Returns (paper, created). Only flushes -- the caller commits."""
+    paper = Paper.query.filter_by(is_collection=True, subject=subject).first()
+    if paper:
+        return paper, False
+    paper = Paper(
+        school=QUICK_ADD_SCHOOL,
+        subject=subject,
+        year_level=QUICK_ADD_YEAR_LEVEL,
+        exam_type=QUICK_ADD_EXAM_TYPE,
+        exam_year=None,
+        file_path="",
+        solution_file_path=None,
+        is_collection=True,
+    )
+    db.session.add(paper)
+    db.session.flush()
+    return paper, True
+
+
+@app.route("/api/papers/collection", methods=["POST"])
+def get_collection_paper():
+    """Returns (creating it if needed) the subject's hidden Screenshots
+    paper. Used when trimming freshly-picked screenshots in Chop, where the
+    trimmed crops need a paper to belong to but the untrimmed originals aren't
+    stored. Expects JSON: { "subject": "Physics" }."""
+    subject = ((request.get_json() or {}).get("subject") or "").strip()
+    if not subject:
+        return jsonify({"error": "subject is required"}), 400
+    paper, created = get_or_create_collection(subject)
+    db.session.commit()
+    return jsonify(paper.to_dict()), 201 if created else 200
+
+
+@app.route("/api/screenshots", methods=["POST"])
+def add_screenshots():
+    """Bulk quick-add: each PNG/JPG becomes an unclassified question directly
+    (it lands in the Classify queue) -- no paper per screenshot, no chopping.
+    All of a subject's screenshots share one hidden collection paper.
+    Expects multipart/form-data: subject, and one or more `file` parts.
+    Files that aren't PNG/JPG are skipped and reported, not fatal."""
+    subject = (request.form.get("subject") or "").strip()
+    if not subject:
+        return jsonify({"error": "subject is required"}), 400
+    files = [f for f in request.files.getlist("file") if f and f.filename]
+    if not files:
+        return jsonify({"error": "at least one image file is required"}), 400
+
+    paper, _ = get_or_create_collection(subject)
+    created, skipped = [], []
+    for f in files:
+        secured = secure_filename(f.filename)
+        ext = secured.rsplit(".", 1)[1].lower() if "." in secured else ""
+        if ext not in IMAGE_EXTENSIONS:
+            skipped.append({"filename": f.filename, "error": "only PNG or JPG images can be added this way"})
+            continue
+        path = save_upload(f, subfolder=os.path.join("crops", secure_filename(subject)))
+        question = Question(
+            paper_id=paper.id, question_number=None, unit=None,
+            topic="", subtopic=None, difficulty="", page_number=None, notes=None,
+        )
+        db.session.add(question)
+        db.session.flush()
+        db.session.add(QuestionImage(
+            question_id=question.id, kind="question", page_number=None,
+            file_path=path, order_index=0,
+        ))
+        created.append(question)
+
+    if not created:
+        db.session.rollback()  # also drops a collection paper that was only just created
+        return jsonify({"error": "no usable images (PNG or JPG only)", "skipped": skipped}), 400
+    db.session.commit()
+    return jsonify({
+        "paper": paper.to_dict(),
+        "created": [q.to_dict() for q in created],
+        "skipped": skipped,
+    }), 201
 
 
 @app.route("/api/papers/<int:paper_id>", methods=["PATCH"])
@@ -1023,6 +1121,13 @@ if __name__ == "__main__":
             with db.engine.begin() as conn:
                 conn.execute(db.text("ALTER TABLE questions ADD COLUMN review_note TEXT"))
             existing_cols.add("review_note")
+
+        # Screenshots-collection flag on papers -- same safe pattern: a constant
+        # default means every existing paper simply reads as "not a collection".
+        paper_cols = {c["name"] for c in inspector.get_columns("papers")}
+        if "is_collection" not in paper_cols:
+            with db.engine.begin() as conn:
+                conn.execute(db.text("ALTER TABLE papers ADD COLUMN is_collection INTEGER NOT NULL DEFAULT 0"))
 
         # Multi-page support: question/answer images now live in their own
         # question_images table (one question can have several page crops)

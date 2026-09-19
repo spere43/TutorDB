@@ -110,15 +110,18 @@
 
     <div class="quick-add-box">
       <h3>Quick add a circulating question/screenshot</h3>
-      <p class="hint">For a one-off question that isn't from a specific paper you're tracking -- skips the usual details and goes straight to chopping.</p>
+      <p class="hint">For one-off questions that aren't from a paper you're tracking. Pick or paste one or several screenshots and each becomes a question that goes straight to the Classify tab -- no chopping needed. Tick "Trim first" only if a screenshot needs cropping. A PDF opens in Chop as before.</p>
       <form id="quick-add-form">
         <label>Subject
           <input list="subject-list" id="qa-subject" required>
         </label>
-        <label>Image or file
-          <input type="file" id="qa-file" accept=".pdf,.doc,.docx,.png,.jpg,.jpeg" required>
+        <label>Screenshots or a PDF
+          <input type="file" id="qa-file" accept=".pdf,.png,.jpg,.jpeg" multiple>
         </label>
-        <button type="submit">Add &amp; start chopping</button>
+        <div class="paste-zone" id="qa-paste">Or paste a screenshot from your clipboard: press <b>Ctrl+V</b> (<b>&#8984;V</b> on a Mac) anywhere on this tab</div>
+        <div class="qa-queue" id="qa-queue"></div>
+        <label class="qa-trim"><input type="checkbox" id="qa-trim"> Trim first (opens each screenshot in Chop so you can crop it)</label>
+        <button type="submit" id="qa-submit">Add</button>
       </form>
       <div id="quick-add-status" class="status-msg"></div>
     </div>
@@ -154,6 +157,11 @@
           </span>
           <button id="zoom-in" aria-label="Zoom in">+</button>
           <button id="zoom-fit" class="secondary">Fit</button>
+        </div>
+        <div class="chop-session" id="chop-session" style="display:none;">
+          <button type="button" id="session-prev" class="secondary small">&lsaquo; Prev</button>
+          <span id="session-label" class="muted"></span>
+          <button type="button" id="session-next" class="small">Next &rsaquo;</button>
         </div>
       </div>
 

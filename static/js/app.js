@@ -4,6 +4,15 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/vendor/pdfjs/pdf.worker.min.mj
 // ---------------------------------------------------------------
 // Tab switching
 // ---------------------------------------------------------------
+// Show a tab without running its click handler (which would, for Chop, reset
+// the workspace to the paper picker).
+function showTabQuietly(tab) {
+  document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+  document.querySelector(`.tab-btn[data-tab="${tab}"]`).classList.add("active");
+  document.getElementById(`tab-${tab}`).classList.add("active");
+}
+
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
@@ -366,44 +375,188 @@ document.getElementById("add-paper-form").addEventListener("submit", async (e) =
   }
 });
 
-// Quick add: for a one-off circulating screenshot/question that isn't
-// really "a paper" -- skips straight to chopping instead of landing back
-// on this tab, since speed is the whole point.
-document.getElementById("quick-add-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const statusEl = document.getElementById("quick-add-status");
-  const subject = document.getElementById("qa-subject").value.trim();
-  const file = document.getElementById("qa-file").files[0];
+// ---------------------------------------------------------------
+// QUICK ADD
+// ---------------------------------------------------------------
+// Pick or paste screenshots (several is fine). Each becomes a question that
+// goes straight to the Classify queue -- no chopping, and no paper per
+// screenshot (they all hang off one hidden "Screenshots" paper per subject).
+// "Trim first" walks through them in Chop instead. A PDF still opens in Chop.
+let quickQueue = []; // [{ file, url }] -- url is a preview object URL (images only)
 
-  if (!subject || !file) {
-    statusEl.textContent = "Subject and a file are required.";
-    statusEl.className = "status-msg err";
+const isImageFile = f => /\.(png|jpe?g)$/i.test(f.name || "") || /^image\/(png|jpeg)$/.test(f.type || "");
+const isPdfFile = f => /\.pdf$/i.test(f.name || "") || f.type === "application/pdf";
+
+function quickStatus(text, kind) {
+  const el = document.getElementById("quick-add-status");
+  el.textContent = text;
+  el.className = "status-msg" + (kind ? " " + kind : "");
+}
+
+// A pasted screenshot often arrives as a nameless "image.png", or with no
+// extension at all -- give it a proper name so the server accepts it.
+function normalizeImageFile(f, n) {
+  if (/\.(png|jpe?g)$/i.test(f.name || "")) return f;
+  const ext = /jpeg/.test(f.type) ? "jpg" : "png";
+  return new File([f], `screenshot-${Date.now()}-${n}.${ext}`, { type: f.type || "image/png" });
+}
+
+function updateQuickSubmitLabel() {
+  const btn = document.getElementById("qa-submit");
+  const n = quickQueue.length;
+  if (n === 1 && isPdfFile(quickQueue[0].file)) btn.textContent = "Add & start chopping";
+  else if (n === 0) btn.textContent = "Add";
+  else btn.textContent = (document.getElementById("qa-trim").checked ? "Trim " : "Add ") + n + (n === 1 ? " screenshot" : " screenshots");
+}
+
+function renderQuickQueue() {
+  document.getElementById("qa-queue").replaceChildren(...quickQueue.map((item, i) => {
+    const tile = document.createElement("div");
+    tile.className = "qa-thumb" + (item.url ? "" : " qa-file");
+    if (item.url) {
+      const img = document.createElement("img");
+      img.src = item.url;
+      img.alt = "screenshot";
+      tile.append(img);
+    } else {
+      tile.append(item.file.name);
+    }
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "qa-remove";
+    x.title = "Remove";
+    x.textContent = "×";
+    x.dataset.index = i;
+    tile.append(x);
+    return tile;
+  }));
+  updateQuickSubmitLabel();
+}
+
+function clearQuickQueue() {
+  quickQueue.forEach(q => q.url && URL.revokeObjectURL(q.url));
+  quickQueue = [];
+  renderQuickQueue();
+}
+
+function addToQuickQueue(files) {
+  const accepted = [], rejected = [];
+  files.forEach((f, i) => {
+    if (isImageFile(f)) accepted.push(normalizeImageFile(f, i));
+    else if (isPdfFile(f)) accepted.push(f);
+    else rejected.push(f.name || "an unnamed file");
+  });
+  if (rejected.length) quickStatus(`Skipped ${rejected.join(", ")} -- only PNG, JPG or PDF files can be added.`, "err");
+  if (!accepted.length) return;
+  const combined = [...quickQueue.map(q => q.file), ...accepted];
+  const pdfs = combined.filter(isPdfFile).length;
+  if (pdfs && (pdfs > 1 || combined.length > 1)) {
+    quickStatus("Add screenshots, or a single PDF -- not both.", "err");
     return;
   }
+  if (!rejected.length) quickStatus("", "");
+  accepted.forEach(f => quickQueue.push({ file: f, url: isImageFile(f) ? URL.createObjectURL(f) : null }));
+  renderQuickQueue();
+}
 
-  statusEl.textContent = "Adding...";
-  statusEl.className = "status-msg";
+document.getElementById("qa-file").addEventListener("change", (e) => {
+  addToQuickQueue([...e.target.files]);
+  e.target.value = ""; // so picking the same file again still registers
+});
+document.getElementById("qa-trim").addEventListener("change", updateQuickSubmitLabel);
+document.getElementById("qa-queue").addEventListener("click", (e) => {
+  const btn = e.target.closest(".qa-remove");
+  if (!btn) return;
+  const [removed] = quickQueue.splice(Number(btn.dataset.index), 1);
+  if (removed && removed.url) URL.revokeObjectURL(removed.url);
+  renderQuickQueue();
+});
 
-  const formData = new FormData();
-  formData.append("subject", subject);
-  formData.append("file", file);
+// Ctrl/Cmd+V anywhere on the Add Paper tab. Plain-text pastes (into the
+// subject box, say) are left alone -- only clipboards that carry files.
+document.addEventListener("paste", (e) => {
+  if (!document.getElementById("tab-add").classList.contains("active")) return;
+  const cd = e.clipboardData;
+  if (!cd) return;
+  let files = [...cd.files];
+  if (!files.length) files = [...cd.items].filter(i => i.kind === "file").map(i => i.getAsFile()).filter(Boolean);
+  if (!files.length) return;
+  e.preventDefault();
+  addToQuickQueue(files);
+});
+
+function showQuickAdded(res) {
+  const statusEl = document.getElementById("quick-add-status");
+  const n = res.created.length;
+  statusEl.className = "status-msg ok";
+  statusEl.textContent = `Added ${n} screenshot${n === 1 ? "" : "s"} to the Classify queue. `;
+  const link = document.createElement("a");
+  link.href = "#";
+  link.textContent = "Classify now";
+  link.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    document.querySelector('.tab-btn[data-tab="classify"]').click();
+  });
+  statusEl.append(link);
+  if (res.skipped && res.skipped.length) {
+    const note = document.createElement("div");
+    note.className = "muted";
+    note.textContent = `Skipped: ${res.skipped.map(x => x.filename).join(", ")}`;
+    statusEl.append(note);
+  }
+}
+
+document.getElementById("quick-add-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const subject = document.getElementById("qa-subject").value.trim();
+  if (!subject) { quickStatus("Subject is required.", "err"); return; }
+  if (quickQueue.length === 0) { quickStatus("Pick or paste at least one screenshot (or a PDF).", "err"); return; }
+
+  const files = quickQueue.map(q => q.file);
+  const submitBtn = document.getElementById("qa-submit");
+  submitBtn.disabled = true;
+  quickStatus("Adding...", "");
 
   try {
-    const paper = await fetchJSON("/api/papers/quick", { method: "POST", body: formData });
-    document.getElementById("quick-add-form").reset();
-    statusEl.textContent = "";
-    loadDropdownData();
-    refreshPapersList(); // keep the background list in sync for when they come back
-
-    // jump straight to the Chop tab, workspace open on this paper
-    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
-    document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
-    document.querySelector('.tab-btn[data-tab="chop"]').classList.add("active");
-    document.getElementById("tab-chop").classList.add("active");
-    await openChop(paper);
+    if (isPdfFile(files[0])) {
+      // a PDF still becomes a paper and opens in Chop, as before
+      const formData = new FormData();
+      formData.append("subject", subject);
+      formData.append("file", files[0]);
+      const paper = await fetchJSON("/api/papers/quick", { method: "POST", body: formData });
+      clearQuickQueue();
+      quickStatus("", "");
+      loadDropdownData();
+      refreshPapersList();
+      endTrimSession();
+      showTabQuietly("chop");
+      await openChop(paper);
+    } else if (document.getElementById("qa-trim").checked) {
+      // Trim first: nothing is uploaded yet. Chop opens each picked image and
+      // only the crops you save are stored, on the subject's Screenshots paper.
+      const paper = await fetchJSON("/api/papers/collection", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subject }),
+      });
+      clearQuickQueue();
+      quickStatus("", "");
+      loadDropdownData();
+      await startTrimSession(paper, files);
+    } else {
+      const formData = new FormData();
+      formData.append("subject", subject);
+      files.forEach(f => formData.append("file", f));
+      const res = await fetchJSON("/api/screenshots", { method: "POST", body: formData });
+      clearQuickQueue();
+      loadDropdownData();
+      refreshClassifyBadges();
+      showQuickAdded(res);
+    }
   } catch (err) {
-    statusEl.textContent = "Error: " + err.message;
-    statusEl.className = "status-msg err";
+    quickStatus("Error: " + err.message, "err");
+  } finally {
+    submitBtn.disabled = false;
   }
 });
 
@@ -414,7 +567,7 @@ let papersListCache = [];
 // narrows to one subject; `rowRenderer` produces each paper's own row
 // markup, since the Add Paper list and Chop picker use different row
 // templates for the same underlying data.
-function renderGroupedPapers(papers, filterSubject, rowRenderer, emptyMessage) {
+function renderGroupedPapers(papers, filterSubject, rowRenderer, emptyMessage, context) {
   const filtered = filterSubject ? papers.filter(p => p.subject === filterSubject) : papers;
   if (filtered.length === 0) {
     return `<p class="muted">${emptyMessage}</p>`;
@@ -425,10 +578,131 @@ function renderGroupedPapers(papers, filterSubject, rowRenderer, emptyMessage) {
     groups[p.subject].push(p);
   });
   const subjects = Object.keys(groups).sort();
-  return subjects.map(subj => `
-    <h4 class="paper-group-heading">${escapeHtml(subj)} <span class="muted">(${groups[subj].length})</span></h4>
-    ${groups[subj].map(rowRenderer).join("")}
-  `).join("");
+  return subjects.map(subj => {
+    // Papers made with Quick Add collapse into one "Random screenshots" row
+    // per subject instead of cluttering the list one row each.
+    const regular = groups[subj].filter(p => !isQuickPaper(p));
+    const quick = groups[subj].filter(isQuickPaper);
+    return `
+    <h4 class="paper-group-heading">${escapeHtml(subj)}${regular.length ? ` <span class="muted">(${regular.length})</span>` : ""}</h4>
+    ${quick.length ? quickGroupHtml(context, subj, quick) : ""}
+    ${regular.map(rowRenderer).join("")}
+  `;
+  }).join("");
+}
+
+// Papers made with Quick Add (before screenshots became questions directly)
+// all carry these placeholder values, which is what identifies one. Editing
+// a paper's details later turns it back into a normal paper.
+const QUICK_SCHOOL = "Uncategorized";
+const QUICK_EXAM_TYPE = "misc";
+const isQuickPaper = p => !p.is_collection && p.school === QUICK_SCHOOL && p.exam_type === QUICK_EXAM_TYPE;
+
+const expandedQuickGroups = new Set(); // "add:Physics" / "chop:Physics"
+const quickSelected = new Set();        // paper ids ticked in the Add tab's galleries
+
+function quickGroupHtml(context, subject, quick) {
+  const open = expandedQuickGroups.has(`${context}:${subject}`);
+  const subj = escapeAttr(subject);
+  const head = `<button type="button" class="quick-group-toggle" data-qg="toggle" data-subject="${subj}">${open ? "▾" : "▸"} Random screenshots <span class="muted">(${quick.length})</span></button>`;
+  if (!open) return `<div class="quick-group">${head}</div>`;
+  const picked = quick.filter(p => quickSelected.has(p.id)).length;
+  const tools = context === "add" ? `
+      <div class="quick-gallery-toolbar">
+        <button type="button" class="secondary small" data-qg="select-all" data-subject="${subj}">Select all</button>
+        <button type="button" class="secondary small" data-qg="select-empty" data-subject="${subj}">Select ones with no questions</button>
+        <button type="button" class="secondary small" data-qg="select-none" data-subject="${subj}">Clear</button>
+        <button type="button" class="small" data-qg="delete-selected" data-subject="${subj}" ${picked ? "" : "disabled"}>Delete selected (${picked})</button>
+      </div>` : "";
+  return `<div class="quick-group">${head}<div class="quick-gallery">${tools}<div class="quick-tiles">${quick.map(p => quickTileHtml(context, p)).join("")}</div></div></div>`;
+}
+
+function quickTileHtml(context, p) {
+  const url = `/files/${escapeAttr(p.file_path)}`;
+  const thumb = IMAGE_PATH_RE.test(p.file_path)
+    ? `<a class="qt-thumb" href="${url}" target="_blank" title="Open full size"><img loading="lazy" src="${url}" alt="Screenshot"></a>`
+    : `<a class="qt-thumb" href="${url}" target="_blank"><span class="qt-file">${escapeHtml(p.file_path.split(/[\\/]/).pop())}</span></a>`;
+  const used = p.question_count > 0 ? `${p.question_count} question${p.question_count === 1 ? "" : "s"}` : "no questions yet";
+  const ticked = context === "add" && quickSelected.has(p.id);
+  const check = context === "add" ? `<input type="checkbox" data-qg-check="${p.id}" ${ticked ? "checked" : ""}>` : "";
+  const del = context === "add" ? `<button type="button" class="secondary small" data-qg="delete-one" data-id="${p.id}">Delete</button>` : "";
+  return `
+    <div class="quick-tile${ticked ? " selected" : ""}">
+      <div class="qt-top">${check}<span class="muted">${used}</span></div>
+      ${thumb}
+      <div class="qt-actions"><button type="button" class="small" data-qg="chop" data-id="${p.id}">Chop</button>${del}</div>
+    </div>`;
+}
+
+function quickGroupHandler(context) {
+  return (e) => {
+    const el = e.target.closest("[data-qg]");
+    if (!el) return;
+    const action = el.dataset.qg, subject = el.dataset.subject, id = Number(el.dataset.id);
+    const list = context === "add" ? papersListCache : papersCache;
+    const inGroup = () => list.filter(p => p.subject === subject && isQuickPaper(p));
+    const rerender = () => (context === "add" ? renderPapersListFiltered() : renderChopPickerFiltered());
+    if (action === "toggle") {
+      const key = `${context}:${subject}`;
+      if (expandedQuickGroups.has(key)) expandedQuickGroups.delete(key); else expandedQuickGroups.add(key);
+      rerender();
+    } else if (action === "select-all") {
+      inGroup().forEach(p => quickSelected.add(p.id));
+      rerender();
+    } else if (action === "select-empty") {
+      inGroup().forEach(p => (p.question_count === 0 ? quickSelected.add(p.id) : quickSelected.delete(p.id)));
+      rerender();
+    } else if (action === "select-none") {
+      inGroup().forEach(p => quickSelected.delete(p.id));
+      rerender();
+    } else if (action === "delete-selected") {
+      deleteSelectedQuick(subject);
+    } else if (action === "delete-one") {
+      deletePaper(id);
+    } else if (action === "chop") {
+      chopQuickPaper(context, id);
+    }
+  };
+}
+
+function updateQuickDeleteButtons() {
+  document.querySelectorAll('#papers-list [data-qg="delete-selected"]').forEach(btn => {
+    const n = papersListCache.filter(p => p.subject === btn.dataset.subject && isQuickPaper(p) && quickSelected.has(p.id)).length;
+    btn.textContent = `Delete selected (${n})`;
+    btn.disabled = n === 0;
+  });
+}
+
+async function chopQuickPaper(context, id) {
+  const paper = (context === "add" ? papersListCache : papersCache).find(p => p.id === id);
+  if (!paper) return;
+  endTrimSession();
+  if (context === "add") showTabQuietly("chop");
+  try {
+    await openChop(paper);
+  } catch (err) {
+    alert("Couldn't open this file in Chop: " + err.message);
+  }
+}
+
+async function deleteSelectedQuick(subject) {
+  const chosen = papersListCache.filter(p => p.subject === subject && isQuickPaper(p) && quickSelected.has(p.id));
+  if (chosen.length === 0) return;
+  const questions = chosen.reduce((n, p) => n + p.question_count, 0);
+  const what = `${chosen.length} screenshot${chosen.length === 1 ? "" : "s"}`;
+  const warn = questions > 0 ? ` ${questions} question${questions === 1 ? "" : "s"} already chopped from them will be deleted too.` : "";
+  if (!confirm(`Delete ${what}?${warn}`)) return;
+  try {
+    for (const p of chosen) {
+      await fetchJSON(`/api/papers/${p.id}`, { method: "DELETE" });
+      quickSelected.delete(p.id);
+    }
+  } catch (err) {
+    alert("Couldn't delete everything: " + err.message);
+  }
+  await refreshPapersList();
+  refreshClassifyBadges();
+  loadDropdownData();
 }
 
 function paperRowTemplate(p) {
@@ -450,8 +724,9 @@ function paperRowTemplate(p) {
 }
 
 async function refreshPapersList() {
-  const papers = await fetchJSON("/api/papers");
+  const papers = (await fetchJSON("/api/papers")).filter(p => !p.is_collection); // collections are managed via their questions
   papersListCache = papers;
+  for (const id of [...quickSelected]) if (!papers.some(p => p.id === id)) quickSelected.delete(id);
   populateSelect("papers-subject-filter", [...new Set(papers.map(p => p.subject))].sort(), "All subjects");
   renderPapersListFiltered();
 }
@@ -459,10 +734,19 @@ async function refreshPapersList() {
 function renderPapersListFiltered() {
   const filterSubject = document.getElementById("papers-subject-filter").value;
   document.getElementById("papers-list").innerHTML =
-    renderGroupedPapers(papersListCache, filterSubject, paperRowTemplate, "No papers added yet.");
+    renderGroupedPapers(papersListCache, filterSubject, paperRowTemplate, "No papers added yet.", "add");
 }
 
 document.getElementById("papers-subject-filter").addEventListener("change", renderPapersListFiltered);
+document.getElementById("papers-list").addEventListener("click", quickGroupHandler("add"));
+document.getElementById("papers-list").addEventListener("change", (e) => {
+  const cb = e.target.closest("[data-qg-check]");
+  if (!cb) return;
+  const id = Number(cb.dataset.qgCheck);
+  if (cb.checked) quickSelected.add(id); else quickSelected.delete(id);
+  cb.closest(".quick-tile").classList.toggle("selected", cb.checked);
+  updateQuickDeleteButtons();
+});
 
 // Lets you fix/backfill a paper's metadata -- e.g. set "unit" on a paper
 // added before that field existed -- without touching the uploaded file
@@ -537,6 +821,7 @@ async function deletePaper(id) {
   if (!confirm("Delete this paper and all its chopped questions?")) return;
   await fetchJSON(`/api/papers/${id}`, { method: "DELETE" });
   refreshPapersList();
+  refreshClassifyBadges(); // its questions may have been unclassified or flagged
 }
 
 // ---------------------------------------------------------------
@@ -555,9 +840,10 @@ function chopPaperRowTemplate(p) {
 }
 
 async function refreshChopPicker() {
+  endTrimSession();
   document.getElementById("chop-workspace").style.display = "none";
   document.getElementById("chop-picker").style.display = "block";
-  const papers = await fetchJSON("/api/papers");
+  const papers = (await fetchJSON("/api/papers")).filter(p => !p.is_collection);
   papersCache = papers;
   populateSelect("chop-subject-filter", [...new Set(papers.map(p => p.subject))].sort(), "All subjects");
   renderChopPickerFiltered();
@@ -567,11 +853,13 @@ function renderChopPickerFiltered() {
   const filterSubject = document.getElementById("chop-subject-filter").value;
   document.getElementById("chop-papers-list").innerHTML = renderGroupedPapers(
     papersCache, filterSubject, chopPaperRowTemplate,
-    papersCache.length === 0 ? "No papers yet — add one in the Add Paper tab first." : "No papers for this subject."
+    papersCache.length === 0 ? "No papers yet — add one in the Add Paper tab first." : "No papers for this subject.",
+    "chop"
   );
 }
 
 document.getElementById("chop-subject-filter").addEventListener("change", renderChopPickerFiltered);
+document.getElementById("chop-papers-list").addEventListener("click", quickGroupHandler("chop"));
 document.getElementById("chop-back").addEventListener("click", refreshChopPicker);
 
 let papersCache = [];
@@ -606,6 +894,7 @@ const ZOOM_STEP_FACTOR = 1.15;
 async function openChopById(paperId) {
   const paper = papersCache.find(p => p.id === paperId);
   if (!paper) return;
+  endTrimSession();
   await openChop(paper);
 }
 
@@ -676,12 +965,111 @@ document.getElementById("q-topic").addEventListener("input", () => {
 // pdf.js, depending on which mode we're chopping in.
 async function loadPdfForMode() {
   const path = chopMode === "answers" ? currentPaper.solution_file_path : currentPaper.file_path;
-  const loadingTask = pdfjsLib.getDocument(`/files/${path}`);
-  pdfDoc = await loadingTask.promise;
+  if (chopSession && chopMode === "questions") {
+    // a freshly-picked screenshot being trimmed (still on this device)
+    pdfDoc = await loadImageDocument(chopSession.urls[chopSession.index]);
+  } else if (IMAGE_PATH_RE.test(path)) {
+    // an image stored as a paper's file (e.g. from the old Quick Add)
+    pdfDoc = await loadImageDocument(`/files/${path}`);
+  } else {
+    pdfDoc = await pdfjsLib.getDocument(`/files/${path}`).promise;
+  }
   currentPage = 1;
   await fitToWidth();
   await renderPage(currentPage);
 }
+
+// ---- Images as one-page "documents" ----
+// A screenshot is a single raster page. This wraps a loaded <img> in the small
+// interface the Chop code already uses for a pdf.js document/page
+// (numPages, getPage, getViewport, render), so the viewer, zoom, box drawing
+// and cropping all work on images unchanged. The image's natural pixel size is
+// scale 1, which lets crops be cut from the original pixels 1:1.
+const IMAGE_PATH_RE = /\.(png|jpe?g)$/i;
+
+class ImagePage {
+  constructor(img) {
+    this.img = img;
+    this.isImage = true;
+  }
+  getViewport({ scale }) {
+    return { width: this.img.naturalWidth * scale, height: this.img.naturalHeight * scale, scale };
+  }
+  render({ canvasContext: ctx, viewport, transform }) {
+    ctx.save();
+    if (transform) ctx.transform(...transform);
+    ctx.fillStyle = "#fff"; // a transparent PNG shouldn't show the dark page behind it
+    ctx.fillRect(0, 0, viewport.width, viewport.height);
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(this.img, 0, 0, viewport.width, viewport.height);
+    ctx.restore();
+    return { promise: Promise.resolve() };
+  }
+}
+
+async function loadImageDocument(url) {
+  const img = new Image();
+  img.src = url;
+  await img.decode(); // rejects if the file isn't a readable image
+  const page = new ImagePage(img);
+  return { numPages: 1, getPage: async () => page };
+}
+
+// ---- Trimming freshly-picked screenshots (Quick Add's "Trim first") ----
+// { files, urls, index } while walking through the screenshots you picked. The
+// untrimmed originals are never uploaded -- only the crops you save are, as
+// questions on the subject's Screenshots paper.
+let chopSession = null;
+
+function endTrimSession() {
+  if (!chopSession) return;
+  chopSession.urls.forEach(u => URL.revokeObjectURL(u));
+  chopSession = null;
+  document.getElementById("chop-session").style.display = "none";
+}
+
+function renderSessionStrip() {
+  const strip = document.getElementById("chop-session");
+  if (!chopSession) { strip.style.display = "none"; return; }
+  const last = chopSession.index === chopSession.files.length - 1;
+  strip.style.display = "flex";
+  document.getElementById("session-label").textContent = `Screenshot ${chopSession.index + 1} / ${chopSession.files.length}`;
+  document.getElementById("session-prev").disabled = chopSession.index === 0;
+  document.getElementById("session-next").textContent = last ? "Finish" : "Next ›";
+}
+
+async function startTrimSession(paper, files) {
+  endTrimSession();
+  chopSession = { files, urls: files.map(f => URL.createObjectURL(f)), index: 0 };
+  showTabQuietly("chop");
+  await openChop(paper);
+  document.getElementById("chop-paper-title").textContent = `Screenshots — ${paper.subject}`;
+  renderSessionStrip();
+}
+
+async function sessionStep(delta) {
+  if (!chopSession) return;
+  if (pendingCropBlob || stagedQuestionParts.length) {
+    if (!confirm("Discard the selection you haven't saved on this screenshot?")) return;
+  }
+  const next = chopSession.index + delta;
+  if (next < 0) return;
+  if (next >= chopSession.files.length) { // Finish
+    endTrimSession();
+    refreshClassifyBadges();
+    showTabQuietly("add");
+    quickStatus("Finished trimming.", "ok");
+    return;
+  }
+  chopSession.index = next;
+  resetQuestionForm();
+  clearOverlay();
+  await loadPdfForMode();
+  renderSessionStrip();
+}
+
+document.getElementById("session-prev").addEventListener("click", () => sessionStep(-1));
+document.getElementById("session-next").addEventListener("click", () => sessionStep(1));
 
 function showChopFormForMode() {
   document.getElementById("chop-form-questions").style.display = chopMode === "questions" ? "block" : "none";
@@ -1008,12 +1396,26 @@ async function renderCropHighRes(x, y, w, h) {
   const pxToPage = 1 / (renderedDpr * scale);
 
   const page = await doc.getPage(pageNum);
-  const pageX = x * pxToPage, pageY = y * pxToPage;
-  const pageW = w * pxToPage, pageH = h * pxToPage;
+  let pageX = x * pxToPage, pageY = y * pxToPage;
+  let pageW = w * pxToPage, pageH = h * pxToPage;
+
+  // A screenshot is already raster: cut its own pixels out 1:1 (a whole-pixel
+  // box, no resampling) instead of re-rendering at a higher scale, which would
+  // only upsample it.
+  const native = !!page.isImage;
+  if (native) {
+    const imgW = page.img.naturalWidth, imgH = page.img.naturalHeight;
+    const x0 = Math.max(0, Math.round(pageX)), y0 = Math.max(0, Math.round(pageY));
+    const x1 = Math.min(imgW, Math.round(pageX + pageW)), y1 = Math.min(imgH, Math.round(pageY + pageH));
+    pageX = x0;
+    pageY = y0;
+    pageW = Math.max(1, x1 - x0);
+    pageH = Math.max(1, y1 - y0);
+  }
 
   // Never export softer than what's on screen (e.g. zoomed in on a Retina
   // display), but never exceed the browser's canvas limit either.
-  let exportScale = Math.max(CROP_EXPORT_SCALE, scale * renderedDpr);
+  let exportScale = native ? 1 : Math.max(CROP_EXPORT_SCALE, scale * renderedDpr);
   const pixels = pageW * pageH * exportScale * exportScale;
   if (pixels > MAX_CROP_PIXELS) exportScale *= Math.sqrt(MAX_CROP_PIXELS / pixels);
 
@@ -1366,12 +1768,16 @@ async function refreshPaperFilterOptions() {
   }
   const school = document.getElementById("f-school").value;
   const papers = await fetchJSON("/api/papers");
-  const matches = papers.filter(p => p.subject === subject && (!school || p.school === school));
+  // Quick Add papers are all identical placeholders ("Uncategorized -- Y12,
+  // misc"), so they're left out; the School filter finds them. A subject's
+  // Screenshots collection gets a readable name.
+  const matches = papers.filter(p => p.subject === subject && (!school || p.school === school) && !isQuickPaper(p));
   const el = document.getElementById("f-paper");
   const current = el.value;
   el.disabled = false;
-  el.innerHTML = `<option value="">Paper: any</option>` + matches.map(p =>
-    `<option value="${p.id}">${escapeHtml(p.school)} — Y${p.year_level}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""}</option>`
+  el.innerHTML = `<option value="">Paper: any</option>` + matches.map(p => p.is_collection
+    ? `<option value="${p.id}">Screenshots (added with Quick Add)</option>`
+    : `<option value="${p.id}">${escapeHtml(p.school)} — Y${p.year_level}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""}</option>`
   ).join("");
   if (matches.some(p => String(p.id) === current)) el.value = current;
 }
