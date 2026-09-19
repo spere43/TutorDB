@@ -863,19 +863,88 @@ overlay.addEventListener("touchstart", startDraw, { passive: false });
 overlay.addEventListener("touchmove", moveDraw, { passive: false });
 overlay.addEventListener("touchend", endDraw, { passive: false });
 
-function cropSelection(x, y, w, h) {
+// ---- Crop export resolution ----
+// The on-screen canvas is only as sharp as the current zoom level and the
+// device's pixel density, so copying pixels straight off it gives soft,
+// low-resolution crops (and the size varied with zoom). Instead, when a box
+// is drawn, just that region is re-rendered straight from the PDF at a
+// fixed, higher scale.
+//
+// PDF pages are laid out in points (1/72 inch), so a scale of 3 is roughly
+// 216 DPI. Raise it for sharper crops (bigger files); lower it to save disk.
+const CROP_EXPORT_SCALE = 3;
+// Browsers cap canvas size (iOS Safari is the tightest at ~16.7M pixels), so
+// the export scale is reduced automatically for very large selections.
+const MAX_CROP_PIXELS = 16000000;
+
+let cropRequestId = 0; // lets a newer selection supersede one still rendering
+
+// x/y/w/h arrive in overlay-canvas pixels (what the mouse/touch handlers
+// work in). Converts them to page units at scale 1, then renders only that
+// region into an offscreen canvas at the export scale.
+async function renderCropHighRes(x, y, w, h) {
+  // Snapshot everything the maths depends on BEFORE awaiting, so a zoom or
+  // page flip landing mid-render can't skew the selection.
+  const doc = pdfDoc;
+  const pageNum = currentPage;
+  const cssWidth = parseFloat(overlay.style.width); // on-screen page width, CSS px
+  const renderedDpr = overlay.width / cssWidth;
+  const pxToPage = 1 / (renderedDpr * scale);
+
+  const page = await doc.getPage(pageNum);
+  const pageX = x * pxToPage, pageY = y * pxToPage;
+  const pageW = w * pxToPage, pageH = h * pxToPage;
+
+  // Never export softer than what's on screen (e.g. zoomed in on a Retina
+  // display), but never exceed the browser's canvas limit either.
+  let exportScale = Math.max(CROP_EXPORT_SCALE, scale * renderedDpr);
+  const pixels = pageW * pageH * exportScale * exportScale;
+  if (pixels > MAX_CROP_PIXELS) exportScale *= Math.sqrt(MAX_CROP_PIXELS / pixels);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(pageW * exportScale));
+  canvas.height = Math.max(1, Math.round(pageH * exportScale));
+
+  await page.render({
+    canvasContext: canvas.getContext("2d"),
+    viewport: page.getViewport({ scale: exportScale }),
+    // shift the page so the selected region lands at the canvas origin
+    transform: [1, 0, 0, 1, -pageX * exportScale, -pageY * exportScale],
+  }).promise;
+  return canvas;
+}
+
+// Original behaviour, kept as a fallback in case the high-res render fails:
+// copy the selection's pixels straight off the on-screen canvas.
+function copyCropFromScreen(x, y, w, h) {
   const pdfCanvas = document.getElementById("pdf-canvas");
-  const cropCanvas = document.createElement("canvas");
-  cropCanvas.width = w;
-  cropCanvas.height = h;
-  const ctx = cropCanvas.getContext("2d");
-  ctx.drawImage(pdfCanvas, x, y, w, h, 0, 0, w, h);
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  canvas.getContext("2d").drawImage(pdfCanvas, x, y, w, h, 0, 0, w, h);
+  return canvas;
+}
+
+async function cropSelection(x, y, w, h) {
+  const requestId = ++cropRequestId;
+  const pageNum = currentPage; // capture now: the user may flip pages mid-render
+  const mode = chopMode;
+
+  let cropCanvas;
+  try {
+    cropCanvas = await renderCropHighRes(x, y, w, h);
+  } catch (err) {
+    console.warn("High-res crop failed, using on-screen pixels instead:", err);
+    cropCanvas = copyCropFromScreen(x, y, w, h);
+  }
+  if (requestId !== cropRequestId) return; // a newer selection took over
 
   cropCanvas.toBlob(blob => {
+    if (requestId !== cropRequestId) return;
     pendingCropBlob = blob;
-    pendingCropPage = currentPage;
+    pendingCropPage = pageNum;
     const previewUrl = URL.createObjectURL(blob);
-    if (chopMode === "answers") {
+    if (mode === "answers") {
       document.getElementById("answer-crop-preview").src = previewUrl;
       document.getElementById("answer-crop-preview-wrap").style.display = "block";
       document.getElementById("save-answer").disabled = false;
@@ -887,6 +956,7 @@ function cropSelection(x, y, w, h) {
       document.getElementById("quick-save-question").disabled = false;
       document.getElementById("add-question-part").disabled = false;
     }
+    cropCanvas.width = cropCanvas.height = 0; // free the canvas memory promptly
   }, "image/png");
 }
 
