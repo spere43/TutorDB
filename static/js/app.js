@@ -49,6 +49,11 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// For values placed inside an HTML attribute (escapeHtml leaves quotes alone).
+function escapeAttr(str) {
+  return escapeHtml(str).replace(/"/g, "&quot;");
+}
+
 // Your existing tags "Tech free" / "Tech active" / "MCQ" -- pressing one
 // of these just types that same text into the comma-separated tag field,
 // so a button-added tag and a hand-typed one are the exact same string
@@ -1278,7 +1283,7 @@ document.getElementById("quick-save-question").addEventListener("click", async (
     statusEl.className = "status-msg ok";
     clearOverlay();
     resetQuestionForm();
-    refreshUnclassifiedBadge();
+    refreshClassifyBadges();
   } catch (err) {
     statusEl.textContent = "Error: " + err.message;
     statusEl.className = "status-msg err";
@@ -1500,6 +1505,7 @@ function renderQuestionCard(q) {
       }
       ${q.question_images.length > 1 ? `<div class="page-count-badge">${q.question_images.length} pages</div>` : ""}
       ${!q.is_classified ? `<div class="page-count-badge">⚠ unclassified</div>` : ""}
+      ${q.needs_review ? `<div class="page-count-badge review-flag" title="${escapeAttr(q.review_note || "Flagged for review")}">⚑ review</div>` : ""}
       <div class="meta-row">
         <span>${escapeHtml(q.school)} · ${escapeHtml(q.subject)}</span>
         <span class="diff-tag ${q.difficulty}">${q.difficulty || "?"}</span>
@@ -1529,8 +1535,42 @@ let classifyQueue = [];
 let classifyRemaining = 0;
 let classifySubjectFilter = "";
 let classifySelectedDifficulty = null;
+// "classify" = the quick-saved backlog; "reclassify" = questions flagged for review
+let classifyMode = "classify";
+// Pending subtopic-suggestion refresh for the CURRENT form. Module-level so a
+// re-render (next question, empty state, mode switch) can cancel it -- it must
+// never fire against a form that's already been replaced.
+let clSubtopicTimer = null;
+
+const CLASSIFY_COPY = {
+  classify: {
+    title: "Classify",
+    hint: 'Questions chopped with "Quick save (classify later)" on the Chop tab show up here, one at a time, so you can sort through a whole backlog quickly without re-opening a picker each time.',
+    remaining: "unclassified",
+    empty: "Nothing to classify -- everything's sorted.",
+  },
+  reclassify: {
+    title: "Reclassify",
+    hint: "Questions you flagged for review in the viewer show up here with their current classification filled in. Fix what's wrong and save, or unflag if it's fine as it is.",
+    remaining: "flagged for review",
+    empty: "Nothing flagged for review.",
+  },
+};
+
+document.querySelectorAll("#classify-mode-switch .classify-mode-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    if (classifyMode === btn.dataset.mode) return;
+    classifyMode = btn.dataset.mode;
+    document.querySelectorAll("#classify-mode-switch .classify-mode-btn")
+      .forEach(b => b.classList.toggle("active", b === btn));
+    refreshClassifyTab();
+  });
+});
 
 async function refreshClassifyTab() {
+  document.getElementById("classify-title").textContent = CLASSIFY_COPY[classifyMode].title;
+  document.getElementById("classify-hint").textContent = CLASSIFY_COPY[classifyMode].hint;
+  refreshClassifyBadges();
   const subjects = await fetchJSON("/api/subjects");
   populateSelect("classify-subject-filter", subjects, "All subjects");
   document.getElementById("classify-subject-filter").value = classifySubjectFilter;
@@ -1550,7 +1590,7 @@ document.getElementById("classify-subject-filter").addEventListener("change", ()
 // whether the backlog is a dozen questions or several hundred.
 async function loadMoreClassifyQueue() {
   const params = new URLSearchParams();
-  params.append("unclassified", "1");
+  params.append(classifyMode === "reclassify" ? "needs_review" : "unclassified", "1");
   if (classifySubjectFilter) params.append("subject", classifySubjectFilter);
   params.append("per_page", "40");
   const data = await fetchJSON("/api/questions?" + params.toString());
@@ -1561,23 +1601,38 @@ async function loadMoreClassifyQueue() {
   classifyQueue = classifyQueue.concat(data.questions.filter(q => !existingIds.has(q.id)));
 }
 
-async function refreshUnclassifiedBadge() {
-  const data = await fetchJSON("/api/questions?unclassified=1&per_page=1");
-  const btn = document.getElementById("classify-tab-btn");
-  btn.innerHTML = data.total > 0
-    ? `Classify <span class="unclassified-badge">${data.total}</span>`
-    : "Classify";
+// The two coloured counts read "99+" / "9+" past their cap (the exact number
+// is in the tooltip, and on the Classify tab itself).
+const CLASSIFY_BADGE_CAP = 99;
+const REVIEW_BADGE_CAP = 9;
+
+function badgeHtml(cls, n, cap, label) {
+  if (n <= 0) return "";
+  return `<span class="${cls}" title="${n} ${label}">${n > cap ? cap + "+" : n}</span>`;
+}
+
+// One request feeds both counts: on the tab button and on the
+// Classify / Reclassify switch inside the tab.
+async function refreshClassifyBadges() {
+  const { unclassified, needs_review } = await fetchJSON("/api/classify-counts");
+  const toClassify = badgeHtml("unclassified-badge", unclassified, CLASSIFY_BADGE_CAP, "to classify");
+  const toReview = badgeHtml("review-badge", needs_review, REVIEW_BADGE_CAP, "flagged for review");
+  document.getElementById("classify-tab-btn").innerHTML = `Classify${toClassify}${toReview}`;
+  document.getElementById("cl-mode-classify").innerHTML = `Classify${toClassify}`;
+  document.getElementById("cl-mode-reclassify").innerHTML = `Reclassify${toReview}`;
 }
 
 function renderClassifyCurrent() {
+  clearTimeout(clSubtopicTimer);
   const area = document.getElementById("classify-area");
+  const copy = CLASSIFY_COPY[classifyMode];
   document.getElementById("classify-remaining").textContent =
-    classifyRemaining > 0 ? `${classifyRemaining} unclassified` : "";
+    classifyRemaining > 0 ? `${classifyRemaining} ${copy.remaining}` : "";
 
   const q = classifyQueue[0];
   if (!q) {
     area.innerHTML = classifyRemaining === 0
-      ? `<p class="muted">Nothing to classify -- everything's sorted.</p>`
+      ? `<p class="muted">${copy.empty}</p>`
       : `<p class="muted">Loading...</p>`;
     return;
   }
@@ -1597,6 +1652,7 @@ function renderClassifyCurrent() {
         ${pages || `<p class="muted">No crop image (page ${q.page_number || "?"})</p>`}
       </div>
       <div class="classify-form">
+        ${classifyMode === "reclassify" ? flagBannerHtml(q) : ""}
         <div class="muted">${escapeHtml(q.school)} · ${escapeHtml(q.subject)}</div>
 
         <label>Unit
@@ -1640,7 +1696,8 @@ function renderClassifyCurrent() {
         </label>
 
         <div class="classify-actions">
-          <button type="button" id="cl-save-next">Save &amp; next</button>
+          <button type="button" id="cl-save-next">${classifyMode === "reclassify" ? "Save &amp; clear flag" : "Save &amp; next"}</button>
+          ${classifyMode === "reclassify" ? `<button type="button" class="secondary" id="cl-unflag">Looks fine — unflag</button>` : ""}
           <button type="button" class="secondary" id="cl-skip">Skip for now</button>
           <button type="button" class="secondary" id="cl-delete">Delete</button>
         </div>
@@ -1663,6 +1720,7 @@ function renderClassifyCurrent() {
     const unit = document.getElementById("cl-unit").value;
     if (!unit) { populateDatalist("cl-topic-list", []); return; }
     const topics = await fetchJSON(`/api/topics?subject=${encodeURIComponent(q.subject)}&unit=${encodeURIComponent(unit)}`);
+    if (classifyQueue[0] !== q) return; // the form moved on while this was loading
     populateDatalist("cl-topic-list", topics);
   }
   async function refreshClSubtopics() {
@@ -1670,6 +1728,7 @@ function renderClassifyCurrent() {
     const topics = topicParams(document.getElementById("cl-topic"));
     if (!unit || !topics) { populateDatalist("cl-subtopic-list", []); return; }
     const subtopics = await fetchJSON(`/api/subtopics?subject=${encodeURIComponent(q.subject)}&unit=${encodeURIComponent(unit)}${topics}`);
+    if (classifyQueue[0] !== q) return; // the form moved on while this was loading
     populateDatalist("cl-subtopic-list", subtopics);
   }
   document.getElementById("cl-unit").addEventListener("change", () => {
@@ -1681,7 +1740,6 @@ function renderClassifyCurrent() {
     // This matches how the original Chop form's unit handler behaves.
     populateDatalist("cl-subtopic-list", []);
   });
-  let clSubtopicTimer = null;
   document.getElementById("cl-topic").addEventListener("input", () => {
     clearTimeout(clSubtopicTimer);
     clSubtopicTimer = setTimeout(refreshClSubtopics, 250);
@@ -1693,19 +1751,41 @@ function renderClassifyCurrent() {
   attachMultiSuggest(document.getElementById("cl-subtopic"));
   document.getElementById("cl-skip").addEventListener("click", skipClassifyCurrent);
   document.getElementById("cl-delete").addEventListener("click", deleteClassifyCurrent);
+
+  if (classifyMode === "reclassify") {
+    document.getElementById("cl-unflag").addEventListener("click", unflagClassifyCurrent);
+    // Reclassify starts from what the question already has, not a blank form.
+    document.getElementById("cl-unit").value = q.unit || "";
+    document.getElementById("cl-topic").value = q.topics.join(", ");
+    document.getElementById("cl-subtopic").value = q.subtopics.join(", ");
+    document.getElementById("cl-tags").value = q.tags.join(", ");
+    document.getElementById("cl-notes").value = q.notes || "";
+    classifySelectedDifficulty = q.difficulty || null;
+    document.querySelectorAll("#cl-diff-buttons .diff-btn")
+      .forEach(b => b.classList.toggle("selected", b.dataset.diff === q.difficulty));
+    refreshClTopics();
+    // typing events refresh the suggestion chips and the scoped subtopic list
+    document.getElementById("cl-topic").dispatchEvent(new Event("input"));
+    document.getElementById("cl-subtopic").dispatchEvent(new Event("input"));
+  }
 }
 
 async function advanceClassifyQueue() {
   classifyQueue.shift();
   if (classifyQueue.length < 5) await loadMoreClassifyQueue();
   renderClassifyCurrent();
-  refreshUnclassifiedBadge();
+  refreshClassifyBadges();
 }
 
 async function saveClassifyCurrent() {
   const q = classifyQueue[0];
   const statusEl = document.getElementById("classify-status");
-  const topics = parseMulti(document.getElementById("cl-topic").value, datalistValues("cl-topic-list"));
+  // `q.topics` counts as "known" so a name containing a comma on this very
+  // question parses back to itself (matters when reclassifying).
+  const topics = parseMulti(document.getElementById("cl-topic").value,
+    [...datalistValues("cl-topic-list"), ...q.topics]);
+  const subtopics = parseMulti(document.getElementById("cl-subtopic").value,
+    [...datalistValues("cl-subtopic-list"), ...q.subtopics]);
   const unit = document.getElementById("cl-unit").value;
 
   if (!unit) {
@@ -1736,13 +1816,36 @@ async function saveClassifyCurrent() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         unit: parseInt(unit, 10),
-        topics,
-        subtopics: parseMulti(document.getElementById("cl-subtopic").value, datalistValues("cl-subtopic-list")),
+        // only what actually changed, so saving can never rewrite a
+        // classification you didn't touch
+        ...(sameList(topics, q.topics.map(t => t.trim())) ? {} : { topics }),
+        ...(sameList(subtopics, q.subtopics.map(t => t.trim())) ? {} : { subtopics }),
         question_number: document.getElementById("cl-number").value.trim() || null,
         difficulty: classifySelectedDifficulty,
         notes: document.getElementById("cl-notes").value.trim() || null,
         tags,
+        // saving from Reclassify resolves the flag
+        ...(classifyMode === "reclassify" ? { needs_review: false } : {}),
       }),
+    });
+    classifyRemaining = Math.max(0, classifyRemaining - 1);
+    await advanceClassifyQueue();
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+    statusEl.className = "status-msg err";
+  }
+}
+
+// Reviewed and it's fine as it is: clear the flag and leave the
+// classification exactly as it was.
+async function unflagClassifyCurrent() {
+  const q = classifyQueue[0];
+  const statusEl = document.getElementById("classify-status");
+  try {
+    await fetchJSON(`/api/questions/${q.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ needs_review: false }),
     });
     classifyRemaining = Math.max(0, classifyRemaining - 1);
     await advanceClassifyQueue();
@@ -1807,6 +1910,98 @@ function modalNav(delta) {
   renderModalQuestion();
 }
 
+// ---- Flag for review (viewer) ----
+function flagBannerHtml(q, withUnflag = false) {
+  return `<div class="flag-banner" id="flag-banner">
+      <span>⚑ Flagged for review${q.review_note ? " — " + escapeHtml(q.review_note) : ""}</span>
+      ${withUnflag ? `<button type="button" id="modal-edit-unflag" class="secondary small">Unflag</button>` : ""}
+    </div>`;
+}
+
+// Label follows the current question. Disabled while editing: flagging is
+// done from the viewer, and the Edit form has its own Unflag button.
+function updateModalFlagButton() {
+  const q = browseResultsCache[modalIndex];
+  if (!q) return;
+  const btn = document.getElementById("modal-flag");
+  btn.textContent = q.needs_review ? "⚑ Unflag" : "⚑ Flag";
+  btn.classList.toggle("flagged", !!q.needs_review);
+  btn.disabled = modalEditing;
+}
+
+async function patchModalFlag(fields) {
+  const q = browseResultsCache[modalIndex];
+  const updated = await fetchJSON(`/api/questions/${q.id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  browseResultsCache[modalIndex] = updated;
+  // refresh just this card behind the modal, and the tab counts
+  const card = document.getElementById(`q-card-${updated.id}`);
+  if (card) card.outerHTML = renderQuestionCard(updated);
+  refreshClassifyBadges();
+  return updated;
+}
+
+function showFlagPanel() {
+  if (document.getElementById("flag-panel")) return;
+  const panel = document.createElement("div");
+  panel.id = "flag-panel";
+  panel.className = "flag-panel";
+  panel.innerHTML = `
+    <input type="text" id="flag-note" maxlength="300" placeholder="Why? (optional) e.g. difficulty looks wrong">
+    <button type="button" id="flag-confirm">Flag for review</button>
+    <button type="button" id="flag-cancel" class="secondary">Cancel</button>
+    <div id="flag-status" class="status-msg err" style="width:100%;"></div>
+  `;
+  document.getElementById("modal-body").prepend(panel);
+  const note = document.getElementById("flag-note");
+  note.focus();
+
+  async function submit() {
+    try {
+      await patchModalFlag({ needs_review: true, review_note: note.value.trim() || null });
+      renderModalQuestion();
+    } catch (err) {
+      document.getElementById("flag-status").textContent = "Error: " + err.message;
+    }
+  }
+  document.getElementById("flag-confirm").addEventListener("click", submit);
+  document.getElementById("flag-cancel").addEventListener("click", () => panel.remove());
+  note.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); submit(); }
+    if (e.key === "Escape") { e.stopPropagation(); panel.remove(); } // cancel the panel, not the whole viewer
+  });
+}
+
+document.getElementById("modal-flag").addEventListener("click", async () => {
+  const q = browseResultsCache[modalIndex];
+  if (!q || modalEditing) return;
+  if (!q.needs_review) { showFlagPanel(); return; }
+  try {
+    await patchModalFlag({ needs_review: false });
+    renderModalQuestion();
+  } catch (err) {
+    alert("Couldn't unflag: " + err.message);
+  }
+});
+
+// Unflag from inside the Edit form. Deliberately does NOT re-render the form,
+// which would throw away whatever has been typed but not saved yet.
+async function unflagFromEditForm() {
+  try {
+    await patchModalFlag({ needs_review: false });
+    const banner = document.getElementById("flag-banner");
+    if (banner) banner.remove();
+    updateModalFlagButton();
+  } catch (err) {
+    const statusEl = document.getElementById("modal-edit-status");
+    statusEl.textContent = "Error: " + err.message;
+    statusEl.className = "status-msg err";
+  }
+}
+
 function renderModalQuestion() {
   const q = browseResultsCache[modalIndex];
   if (!q) return;
@@ -1816,6 +2011,7 @@ function renderModalQuestion() {
     `${q.school} · ${q.subject}${q.unit ? " · Unit " + q.unit : ""}${q.topics.length ? " · " + q.topics.join(", ") : ""}${q.subtopics.length ? " · " + q.subtopics.join(", ") : ""}`;
   document.getElementById("modal-prev").disabled = modalIndex === 0;
   document.getElementById("modal-next").disabled = modalIndex === browseResultsCache.length - 1;
+  updateModalFlagButton();
 
   if (modalEditing) {
     renderModalEditForm(q);
@@ -1833,6 +2029,7 @@ function renderModalViewBody(q) {
   `).join("");
 
   document.getElementById("modal-body").innerHTML = `
+    ${q.needs_review ? flagBannerHtml(q) : ""}
     <div class="modal-question-meta">
       <span class="diff-tag ${q.difficulty}">${q.difficulty}</span>
       ${q.question_number ? `<span class="muted">Question ${escapeHtml(q.question_number)}</span>` : ""}
@@ -1855,6 +2052,7 @@ function renderModalEditForm(q) {
 
   document.getElementById("modal-body").innerHTML = `
     <div id="modal-edit-form">
+      ${q.needs_review ? flagBannerHtml(q, true) : ""}
       <label>Unit
         <select id="modal-edit-unit">
           <option value="">Choose a unit</option>
@@ -1914,6 +2112,8 @@ function renderModalEditForm(q) {
   wireQuickTagButtons(form);
   attachMultiSuggest(document.getElementById("modal-edit-topic"));
   attachMultiSuggest(document.getElementById("modal-edit-subtopic"));
+  const unflagBtn = document.getElementById("modal-edit-unflag");
+  if (unflagBtn) unflagBtn.addEventListener("click", unflagFromEditForm);
   form.querySelectorAll(".diff-btn").forEach(btn => {
     if (btn.dataset.diff === q.difficulty) btn.classList.add("selected");
     btn.addEventListener("click", () => {
@@ -2101,12 +2301,14 @@ async function deleteQuestionFromModal() {
   await fetchJSON(`/api/questions/${q.id}`, { method: "DELETE" });
   closeQuestionModal();
   refreshBrowse();
+  refreshClassifyBadges(); // it may have been unclassified or flagged
 }
 
 async function deleteQuestion(id) {
   if (!confirm("Delete this question?")) return;
   await fetchJSON(`/api/questions/${id}`, { method: "DELETE" });
   refreshBrowse();
+  refreshClassifyBadges(); // it may have been unclassified or flagged
 }
 
 document.getElementById("modal-close").addEventListener("click", closeQuestionModal);
@@ -2121,8 +2323,11 @@ document.getElementById("modal-edit").addEventListener("click", () => {
 
 document.addEventListener("keydown", (e) => {
   if (document.getElementById("question-modal").style.display === "none") return;
-  if (e.key === "ArrowLeft") modalNav(-1);
-  if (e.key === "ArrowRight") modalNav(1);
+  // ← / → move the text cursor inside a field (or change a dropdown): they must
+  // not also flip to another question and throw away an in-progress edit.
+  const typing = e.target.matches && e.target.matches("input, textarea, select");
+  if (e.key === "ArrowLeft" && !typing) modalNav(-1);
+  if (e.key === "ArrowRight" && !typing) modalNav(1);
   if (e.key === "Escape") closeQuestionModal();
 });
 
@@ -2140,7 +2345,7 @@ window.removeAnswerImage = removeAnswerImage;
 
 loadDropdownData();
 refreshBrowse();
-refreshUnclassifiedBadge();
+refreshClassifyBadges();
 
 document.getElementById("q-quick-tags").innerHTML = quickTagButtonsHtml("q-tags");
 wireQuickTagButtons(document.getElementById("q-quick-tags"));

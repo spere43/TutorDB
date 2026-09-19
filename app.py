@@ -4,6 +4,7 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import joinedload, selectinload
 from werkzeug.utils import secure_filename
+from werkzeug.datastructures import MultiDict
 from datetime import datetime
 import os
 import uuid
@@ -138,6 +139,14 @@ class Question(db.Model):
     notes = db.Column(db.Text, nullable=True)
     date_added = db.Column(db.DateTime, default=datetime.utcnow)
 
+    # "Flag for review": set from the viewer when a question's classification
+    # looks wrong; flagged questions show up in the Classify tab's Reclassify
+    # queue until they're fixed or unflagged. The note (why it was flagged) is
+    # only kept while flagged. server_default so an older version of the app,
+    # which doesn't know this column, can still insert rows.
+    needs_review = db.Column(db.Boolean, nullable=False, default=False, server_default=db.text("0"))
+    review_note = db.Column(db.Text, nullable=True)
+
     tags = db.relationship("Tag", secondary=question_tags, backref="questions")
 
     # A question can carry several topics and subtopics (typed comma-separated,
@@ -187,6 +196,8 @@ class Question(db.Model):
             # to build its queue, and what the Browse/Chop UI uses to show
             # an "unclassified" flag on a card.
             "is_classified": bool(self.topic) and bool(self.difficulty),
+            "needs_review": bool(self.needs_review),
+            "review_note": self.review_note,
             "tags": [t.name for t in self.tags],
             "school": self.paper.school,
             "subject": self.paper.subject,
@@ -564,6 +575,9 @@ def build_question_query(args):
             )
         )
 
+    if args.get("needs_review"):
+        query = query.filter(Question.needs_review.is_(True))
+
     # Each required tag becomes its own EXISTS clause -- chaining several
     # .filter() calls on the same relationship is how you AND them (a
     # question must satisfy every clause), giving "has all of these tags"
@@ -630,6 +644,18 @@ def list_questions():
         "page": page,
         "per_page": per_page,
         "has_more": page * per_page < total,
+    })
+
+
+@app.route("/api/classify-counts", methods=["GET"])
+def classify_counts():
+    """The two numbers on the Classify tab's badges -- still to classify, and
+    flagged for review -- in one round trip. Built from the same filters as
+    /api/questions?unclassified=1 and ?needs_review=1, so they can't disagree
+    with what those queues actually contain."""
+    return jsonify({
+        "unclassified": build_question_query(MultiDict({"unclassified": "1"})).order_by(None).count(),
+        "needs_review": build_question_query(MultiDict({"needs_review": "1"})).order_by(None).count(),
     })
 
 
@@ -754,6 +780,16 @@ def update_question(question_id):
         names_from_payload(data, "topics", "topic"),
         names_from_payload(data, "subtopics", "subtopic"),
     )
+
+    # Flag for review. The note only lives while the question is flagged:
+    # unflagging (or sending a note for an unflagged question) clears it.
+    if "review_note" in data:
+        note = data["review_note"]
+        question.review_note = (note.strip() or None) if isinstance(note, str) else None
+    if "needs_review" in data:
+        question.needs_review = bool(data["needs_review"])
+    if not question.needs_review:
+        question.review_note = None
 
     if "question_number" in data:
         question.question_number = normalize_question_number(data["question_number"])
@@ -974,6 +1010,20 @@ if __name__ == "__main__":
             # a question in the full-screen viewer to set it retroactively,
             # question by question, without re-uploading anything.
 
+        # Flag-for-review columns. ADD COLUMN with a constant default doesn't
+        # rewrite the table or touch any existing row -- every existing question
+        # just reads as "not flagged". NOT NULL DEFAULT 0 also lets an older
+        # version of the app (which doesn't know the column) keep inserting
+        # rows. These must exist before the first ORM query of Question below.
+        if "needs_review" not in existing_cols:
+            with db.engine.begin() as conn:
+                conn.execute(db.text("ALTER TABLE questions ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0"))
+            existing_cols.add("needs_review")
+        if "review_note" not in existing_cols:
+            with db.engine.begin() as conn:
+                conn.execute(db.text("ALTER TABLE questions ADD COLUMN review_note TEXT"))
+            existing_cols.add("review_note")
+
         # Multi-page support: question/answer images now live in their own
         # question_images table (one question can have several page crops)
         # instead of a single crop_image_path / answer_file_path column. If
@@ -1072,6 +1122,7 @@ if __name__ == "__main__":
             conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_qtopic_question_id ON question_topics(question_id)"))
             conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_qsubtopic_name ON question_subtopics(name)"))
             conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_qsubtopic_question_id ON question_subtopics(question_id)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_question_needs_review ON questions(needs_review)"))
     # debug=False: this runs permanently as a systemd service, not a dev
     # session -- the debug reloader can restart mid-request on a file
     # change, and the debugger's error page allows running arbitrary code

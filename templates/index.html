@@ -242,12 +242,17 @@
 
   <!-- ===================== CLASSIFY TAB ===================== -->
   <section id="tab-classify" class="tab-panel">
+    <!-- Own class (not .mode-btn): the Chop tab attaches its mode logic to every .mode-btn on the page -->
+    <div class="chop-mode-switch" id="classify-mode-switch">
+      <button type="button" class="classify-mode-btn active" id="cl-mode-classify" data-mode="classify">Classify</button>
+      <button type="button" class="classify-mode-btn" id="cl-mode-reclassify" data-mode="reclassify">Reclassify</button>
+    </div>
     <div class="classify-toolbar">
-      <h2 style="margin:0;">Classify</h2>
+      <h2 style="margin:0;" id="classify-title">Classify</h2>
       <select id="classify-subject-filter"><option value="">All subjects</option></select>
       <span id="classify-remaining" class="muted"></span>
     </div>
-    <p class="hint">Questions chopped with "Quick save (classify later)" on the Chop tab show up here, one at a time, so you can sort through a whole backlog quickly without re-opening a picker each time.</p>
+    <p class="hint" id="classify-hint"></p>
     <div id="classify-area"></div>
   </section>
 
@@ -278,6 +283,7 @@
       <span id="modal-meta"></span>
     </div>
     <button id="modal-delete" class="secondary">Delete</button>
+    <button id="modal-flag" class="secondary">⚑ Flag</button>
     <button id="modal-edit" class="secondary">Edit</button>
   </div>
   <button id="modal-prev" class="modal-nav-arrow modal-nav-prev" aria-label="Previous question">&lsaquo;</button>
