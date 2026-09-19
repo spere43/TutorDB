@@ -1,10 +1,20 @@
-# Data - never commit actual papers/questions/db (private content + would bloat the repo)
+# Data - never commit actual papers/questions/db 
 data/
 
 # Python
 venv/
+.venv/
 __pycache__/
 *.pyc
 
+# Local config / logs
+.env
+*.log
+
+# Editors
+.vscode/
+.idea/
+
 # OS
 .DS_Store
+Thumbs.db

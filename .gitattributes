@@ -1,0 +1,2 @@
+# Keep GitHub's language stats about TutorDB's own code, not bundled libraries.
+static/vendor/** linguist-vendored
