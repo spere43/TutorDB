@@ -218,6 +218,29 @@ form#add-paper-form {
   border-color: var(--cf, #ff9800);
 }
 
+/* Topic / subtopic pills on question cards. Same shape as tag pills, but each
+   in its own tinted hue -- violet for topics, cyan for subtopics -- picked to
+   be distinct from the SF/CF/CU difficulty colours (green/orange/red) and the
+   blue used for selected controls, so a glance tells you what each pill is. */
+.tag-pill.topic-pill,
+.tag-pill.subtopic-pill {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  line-height: 1.35;
+  white-space: normal; /* long names wrap inside their pill instead of overflowing the card */
+}
+.tag-pill.topic-pill {
+  background: rgba(167, 139, 250, 0.14);
+  border-color: rgba(167, 139, 250, 0.45);
+  color: #cbbdfd;
+}
+.tag-pill.subtopic-pill {
+  background: rgba(34, 211, 238, 0.11);
+  border-color: rgba(34, 211, 238, 0.40);
+  color: #82e4f2;
+}
+
 .q-card .card-actions {
   display: flex;
   gap: 6px;

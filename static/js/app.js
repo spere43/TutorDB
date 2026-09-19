@@ -1504,7 +1504,9 @@ function renderQuestionCard(q) {
         <span>${escapeHtml(q.school)} · ${escapeHtml(q.subject)}</span>
         <span class="diff-tag ${q.difficulty}">${q.difficulty || "?"}</span>
       </div>
-      <div class="muted">${q.topics.length ? escapeHtml(q.topics.join(", ")) + (q.subtopics.length ? " · " + escapeHtml(q.subtopics.join(", ")) : "") : "Not classified yet"}</div>
+      ${q.topics.length
+        ? `<div>${q.topics.map(t => `<span class="tag-pill topic-pill" title="Topic">${escapeHtml(t)}</span>`).join("")}${q.subtopics.map(s => `<span class="tag-pill subtopic-pill" title="Subtopic">${escapeHtml(s)}</span>`).join("")}</div>`
+        : `<div class="muted">Not classified yet</div>`}
       <div>${q.tags.map(t => `<span class="tag-pill">${escapeHtml(t)}</span>`).join("")}</div>
       <div class="card-actions">
         <button class="secondary" onclick="openQuestionModal(${q.id})">Details</button>
