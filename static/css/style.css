@@ -385,6 +385,142 @@ button.small {
   color: var(--muted);
 }
 
+.page-input-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+#page-input {
+  width: 44px;
+  text-align: right;
+  padding: 4px 4px;
+  font-size: 13px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+}
+/* hide the spinner arrows -- same reasoning as #zoom-input: this is a
+   field you'll mostly type a page number into directly */
+#page-input::-webkit-outer-spin-button,
+#page-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+#page-input { -moz-appearance: textfield; }
+
+#results-load-more {
+  display: block;
+  margin: 16px auto 0;
+}
+
+/* Classify tab -- image(s) beside a compact classification form, one
+   question at a time. Stacks vertically on narrow screens (iPad
+   portrait / iPhone) same as the chop layout does. */
+.classify-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.classify-layout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.classify-images {
+  flex: 1 1 360px;
+  min-width: 260px;
+}
+.classify-form {
+  flex: 1 1 320px;
+  min-width: 260px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+.classify-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.unclassified-badge {
+  display: inline-block;
+  font-size: 11px;
+  background: var(--panel-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 7px;
+  margin-left: 6px;
+}
+
+.quick-tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 12px;
+}
+.quick-tag-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.quick-tag-btn:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* Generic colored-toggle chip -- same idea as .diff-btn.selected, just
+   a single accent color instead of the SF/CF/CU-specific ones, for any
+   multi-select filter (units, topics, subtopics). */
+.chip-btn {
+  font-size: 13px;
+  padding: 5px 12px;
+  border-radius: 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.chip-btn.selected {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 10px;
+}
+
+.filter-chips-block {
+  margin-bottom: 10px;
+}
+.chip-group {
+  margin-bottom: 4px;
+}
+.chip-group-label {
+  display: inline-block;
+  width: 80px;
+  font-size: 12px;
+  color: var(--muted);
+  vertical-align: top;
+  margin-top: 6px;
+}
+.chip-group .chip-row {
+  display: inline-flex;
+  vertical-align: top;
+  margin: 0 0 4px 0;
+}
+
 #zoom-input {
   width: 48px;
   text-align: right;

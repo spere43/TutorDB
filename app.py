@@ -1,5 +1,8 @@
 from flask import Flask, jsonify, request, send_from_directory, render_template, send_file
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import joinedload, selectinload
 from werkzeug.utils import secure_filename
 from datetime import datetime
 import os
@@ -21,12 +24,34 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
 
+
+# WAL mode lets reads keep working while a write is in progress (instead of
+# blocking/locking), and makes the DB file far less likely to end up
+# corrupted if the app is killed mid-write (e.g. a power blip on the
+# Odroid). This fires on every new connection SQLAlchemy opens, and is
+# safe to add on top of an existing database -- SQLite converts the file
+# to WAL the first time this runs and just leaves it that way afterwards,
+# no data is touched or migrated.
+@event.listens_for(Engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.close()
+
+
 ALLOWED_EXTENSIONS = {"pdf", "doc", "docx", "png", "jpg", "jpeg"}
 FILES_DIR = os.path.join(DATA_DIR, "files")
 
 
 def allowed_file(filename):
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+    """Checks the extension on the SANITIZED filename, not the raw one.
+    secure_filename() can strip a filename down to nothing-but-the-
+    extension (e.g. "???.pdf" -> "pdf", with no dot left at all) --
+    checking the raw name let files like that pass this gate and then
+    crash save_upload() when it tried to split an extension off a
+    filename that, post-sanitizing, no longer had one."""
+    secured = secure_filename(filename)
+    return "." in secured and secured.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
 def normalize_question_number(raw):
@@ -140,6 +165,11 @@ class Question(db.Model):
             "question_images": q_images,
             "answer_images": a_images,
             "has_answer": len(a_images) > 0,
+            # False for a question created via the quick-chop path (topic
+            # and/or difficulty still blank) -- what the Classify tab uses
+            # to build its queue, and what the Browse/Chop UI uses to show
+            # an "unclassified" flag on a card.
+            "is_classified": bool(self.topic) and bool(self.difficulty),
             "tags": [t.name for t in self.tags],
             "school": self.paper.school,
             "subject": self.paper.subject,
@@ -394,6 +424,79 @@ def delete_paper(paper_id):
 
 # ---------- Questions ----------
 
+def build_question_query(args):
+    """Applies every /api/questions filter as real SQL (including tags),
+    returning a bare, unordered Query -- reused for both the total count
+    and the page fetch so the two can never disagree. Tag filters used to
+    be done by pulling every matching row into Python and set-intersecting
+    there, which meant "give me the total" and "give me page 3" both had
+    to load the ENTIRE result set just to answer -- fine at a few dozen
+    questions, but exactly the kind of thing that starts to lag once
+    you're into the thousands. `Question.tags.any(...)` turns each tag
+    into its own EXISTS clause, so SQLite does the filtering with an
+    index instead of Python doing it after the fact."""
+    query = Question.query.join(Paper)
+
+    subject = args.get("subject")
+    school = args.get("school")
+    # unit/topic/subtopic/difficulty are multi-value: repeated query params
+    # (unit=3&unit=4) OR together within the field ("has any of these"),
+    # same as tags already do -- getlist() just returns a single-item list
+    # for the old single-value style, so this stays backward compatible.
+    units = args.getlist("unit")
+    topics = args.getlist("topic")
+    subtopics = args.getlist("subtopic")
+    difficulties = args.getlist("difficulty")
+    exam_type = args.get("exam_type")
+    year_level = args.get("year_level")
+    paper_id = args.get("paper_id")
+    tags = args.getlist("tag")
+    exclude_tags = args.getlist("exclude_tag")
+
+    if subject:
+        query = query.filter(Paper.subject == subject)
+    if school:
+        query = query.filter(Paper.school == school)
+    if units:
+        query = query.filter(Question.unit.in_([int(u) for u in units]))
+    if topics:
+        query = query.filter(Question.topic.in_(topics))
+    if subtopics:
+        query = query.filter(Question.subtopic.in_(subtopics))
+    if difficulties:
+        query = query.filter(Question.difficulty.in_([d.upper() for d in difficulties]))
+    if exam_type:
+        query = query.filter(Paper.exam_type == exam_type)
+    if year_level:
+        query = query.filter(Paper.year_level == int(year_level))
+    if paper_id:
+        query = query.filter(Question.paper_id == int(paper_id))
+
+    # Quick-chopped questions are stored with topic/difficulty as "" rather
+    # than NULL (the columns are NOT NULL, but an empty string satisfies
+    # that without needing a schema change) -- so "unclassified" just means
+    # either of those is empty. Covers old rows too if topic/difficulty
+    # were ever blanked out some other way.
+    if args.get("unclassified"):
+        query = query.filter(
+            db.or_(
+                Question.topic.is_(None), Question.topic == "",
+                Question.difficulty.is_(None), Question.difficulty == "",
+            )
+        )
+
+    # Each required tag becomes its own EXISTS clause -- chaining several
+    # .filter() calls on the same relationship is how you AND them (a
+    # question must satisfy every clause), giving "has all of these tags"
+    # without ever materializing the full row set in Python.
+    for tag_name in tags:
+        query = query.filter(Question.tags.any(Tag.name == tag_name))
+    if exclude_tags:
+        query = query.filter(~Question.tags.any(Tag.name.in_(exclude_tags)))
+
+    return query
+
+
 @app.route("/api/questions", methods=["GET"])
 def list_questions():
     """
@@ -402,51 +505,51 @@ def list_questions():
     Multiple "tag" params are AND'd together (must have all listed tags).
     Multiple "exclude_tag" params are OR'd -- a question with ANY of the
     excluded tags is dropped, regardless of whether it also matches "tag".
+
+    Paginated via ?page=&per_page= (defaults 1 / 60, per_page capped at
+    500) -- returns {questions, total, page, per_page, has_more} rather
+    than a bare array, so the Browse tab can page/"load more" through
+    thousands of results instead of rendering (and the browser laying
+    out) every match at once.
     """
-    query = Question.query.join(Paper)
+    base_query = build_question_query(request.args)
 
-    subject = request.args.get("subject")
-    school = request.args.get("school")
-    unit = request.args.get("unit")
-    topic = request.args.get("topic")
-    subtopic = request.args.get("subtopic")
-    difficulty = request.args.get("difficulty")
-    exam_type = request.args.get("exam_type")
-    year_level = request.args.get("year_level")
-    paper_id = request.args.get("paper_id")
-    tags = request.args.getlist("tag")
-    exclude_tags = request.args.getlist("exclude_tag")
+    # Counted on the plain (unjoined-extra) query, before pagination or
+    # eager-loading options are attached -- those don't change which rows
+    # match, only how they're fetched, so this stays accurate no matter
+    # how the fetch below is tuned.
+    total = base_query.order_by(None).count()
 
-    if subject:
-        query = query.filter(Paper.subject == subject)
-    if school:
-        query = query.filter(Paper.school == school)
-    if unit:
-        query = query.filter(Question.unit == int(unit))
-    if topic:
-        query = query.filter(Question.topic == topic)
-    if subtopic:
-        query = query.filter(Question.subtopic == subtopic)
-    if difficulty:
-        query = query.filter(Question.difficulty == difficulty.upper())
-    if exam_type:
-        query = query.filter(Paper.exam_type == exam_type)
-    if year_level:
-        query = query.filter(Paper.year_level == int(year_level))
-    if paper_id:
-        query = query.filter(Question.paper_id == int(paper_id))
+    page = max(1, request.args.get("page", default=1, type=int) or 1)
+    per_page = request.args.get("per_page", default=60, type=int) or 60
+    per_page = max(1, min(per_page, 500))
 
-    results = query.all()
+    # selectinload issues one extra query for ALL tags/images across the
+    # whole page (2 queries total), instead of one extra query PER
+    # question the way the old lazy-loaded `self.paper`, `self.tags`,
+    # `self.images` access in to_dict() did -- that N+1 pattern is what
+    # turns "60 questions" into "60+ round trips to SQLite" and is the
+    # single biggest source of lag once the table has real volume.
+    results = (
+        base_query
+        .options(
+            joinedload(Question.paper),
+            selectinload(Question.tags),
+            selectinload(Question.images),
+        )
+        .order_by(Question.id.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
 
-    if tags:
-        tag_set = set(tags)
-        results = [q for q in results if tag_set.issubset({t.name for t in q.tags})]
-
-    if exclude_tags:
-        exclude_set = set(exclude_tags)
-        results = [q for q in results if not exclude_set.intersection({t.name for t in q.tags})]
-
-    return jsonify([q.to_dict() for q in results])
+    return jsonify({
+        "questions": [q.to_dict() for q in results],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "has_more": page * per_page < total,
+    })
 
 
 @app.route("/api/questions", methods=["POST"])
@@ -500,6 +603,43 @@ def create_question():
             db.session.add(tag)
         question.tags.append(tag)
 
+    db.session.add(question)
+    db.session.commit()
+    return jsonify(question.to_dict()), 201
+
+
+@app.route("/api/questions/quick", methods=["POST"])
+def create_question_quick():
+    """
+    Fast path for the "chop everything now, classify later" workflow --
+    creates a question with topic/difficulty left blank instead of
+    requiring them up front. No schema change involved: those columns
+    stay NOT NULL, an empty string just satisfies that constraint while
+    still meaning "not classified yet" everywhere is_classified is
+    checked. Cropped image upload still goes through the normal
+    /api/questions/<id>/crop endpoint afterward, same as the full flow.
+    Expects JSON: { "paper_id": 1, "page_number": 3 } -- page_number optional.
+    The question shows up in the Classify tab's queue until it's given a
+    topic and difficulty via the normal PATCH endpoint.
+    """
+    data = request.get_json() or {}
+    if not data.get("paper_id"):
+        return jsonify({"error": "paper_id is required"}), 400
+
+    paper = Paper.query.get(data["paper_id"])
+    if not paper:
+        return jsonify({"error": "paper not found"}), 404
+
+    question = Question(
+        paper_id=paper.id,
+        question_number=None,
+        unit=None,
+        topic="",
+        subtopic=None,
+        difficulty="",
+        page_number=data.get("page_number"),
+        notes=None,
+    )
     db.session.add(question)
     db.session.commit()
     return jsonify(question.to_dict()), 201
@@ -572,6 +712,9 @@ def upload_crop(question_id):
         return jsonify({"error": "image file is required"}), 400
 
     image = request.files["image"]
+    if not allowed_file(image.filename):
+        return jsonify({"error": "file type not allowed"}), 400
+
     page_number = request.form.get("page_number", type=int)
     crop_path = save_upload(image, subfolder=os.path.join("crops", secure_filename(question.paper.subject)))
 
@@ -658,35 +801,40 @@ def list_tags():
 
 @app.route("/api/topics", methods=["GET"])
 def list_topics():
-    """Topics are scoped to a subject+unit rather than global, so the
-    dropdown only ever shows topics that actually belong to what you've
-    selected (e.g. Physics Unit 4 topics, not every topic in the DB)."""
+    """Topics are scoped to a subject + unit(s) rather than global, so the
+    picker only ever shows topics that actually belong to what you've
+    selected (e.g. Physics Unit 4 topics, not every topic in the DB).
+    Accepts multiple ?unit= params (union across them) to support
+    multi-selecting units in Browse -- a single ?unit= still works exactly
+    as before."""
     subject = request.args.get("subject")
-    unit = request.args.get("unit")
+    units = request.args.getlist("unit")
     query = db.session.query(Question.topic).join(Paper).distinct()
     if subject:
         query = query.filter(Paper.subject == subject)
-    if unit:
-        query = query.filter(Question.unit == int(unit))
-    return jsonify(sorted([t[0] for t in query.all()]))
+    if units:
+        query = query.filter(Question.unit.in_([int(u) for u in units]))
+    return jsonify(sorted([t[0] for t in query.all() if t[0]]))
 
 
 @app.route("/api/subtopics", methods=["GET"])
 def list_subtopics():
-    """Subtopics scoped to subject+unit+topic (e.g. Bernoulli/Binomial
-    under Maths Methods Unit 3's "Discrete random variables" topic)."""
+    """Subtopics scoped to subject + unit(s) + topic(s) (e.g.
+    Bernoulli/Binomial under Maths Methods Unit 3's "Discrete random
+    variables" topic). Accepts multiple ?unit= and ?topic= params (union
+    across each) for multi-select in Browse."""
     subject = request.args.get("subject")
-    unit = request.args.get("unit")
-    topic = request.args.get("topic")
+    units = request.args.getlist("unit")
+    topics = request.args.getlist("topic")
     query = db.session.query(Question.subtopic).join(Paper) \
         .filter(Question.subtopic.isnot(None)).distinct()
     if subject:
         query = query.filter(Paper.subject == subject)
-    if unit:
-        query = query.filter(Question.unit == int(unit))
-    if topic:
-        query = query.filter(Question.topic == topic)
-    return jsonify(sorted([s[0] for s in query.all()]))
+    if units:
+        query = query.filter(Question.unit.in_([int(u) for u in units]))
+    if topics:
+        query = query.filter(Question.topic.in_(topics))
+    return jsonify(sorted([s[0] for s in query.all() if s[0]]))
 
 
 @app.route("/api/subjects", methods=["GET"])
@@ -784,4 +932,26 @@ if __name__ == "__main__":
                 changed = True
         if changed:
             db.session.commit()
-    app.run(host="0.0.0.0", port=5000, debug=True)
+
+        # Indexes for the columns Browse actually filters/joins on. Safe to
+        # add on top of an existing database with data already in it --
+        # CREATE INDEX IF NOT EXISTS only builds a lookup structure
+        # alongside the table, it doesn't move or rewrite any rows. This is
+        # what keeps filtering fast as the question count grows into the
+        # thousands instead of degrading into full-table scans.
+        with db.engine.begin() as conn:
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_paper_subject ON papers(subject)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_paper_school ON papers(school)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_paper_exam_type ON papers(exam_type)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_question_paper_id ON questions(paper_id)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_question_topic ON questions(topic)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_question_subtopic ON questions(subtopic)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_question_difficulty ON questions(difficulty)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_question_unit ON questions(unit)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_qimage_question_id ON question_images(question_id)"))
+    # debug=False: this runs permanently as a systemd service, not a dev
+    # session -- the debug reloader can restart mid-request on a file
+    # change, and the debugger's error page allows running arbitrary code
+    # from the browser, which isn't something a permanently-on service
+    # should expose even over Tailscale-only access.
+    app.run(host="0.0.0.0", port=5000, debug=False)

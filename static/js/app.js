@@ -14,6 +14,7 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
     if (btn.dataset.tab === "browse") refreshBrowse();
     if (btn.dataset.tab === "add") refreshPapersList();
     if (btn.dataset.tab === "chop") refreshChopPicker();
+    if (btn.dataset.tab === "classify") refreshClassifyTab();
   });
 });
 
@@ -48,6 +49,31 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// Your existing tags "Tech free" / "Tech active" / "MCQ" -- pressing one
+// of these just types that same text into the comma-separated tag field,
+// so a button-added tag and a hand-typed one are the exact same string
+// in the database. Won't duplicate if it's already present, and leaves
+// the cursor in the field so you can keep typing more tags after it.
+const QUICK_TAGS = ["Tech free", "Tech active", "MCQ"];
+
+function quickTagButtonsHtml(inputId) {
+  return `<div class="quick-tag-row">${
+    QUICK_TAGS.map(t => `<button type="button" class="quick-tag-btn" data-target="${inputId}" data-tag="${escapeHtml(t)}">+ ${escapeHtml(t)}</button>`).join("")
+  }</div>`;
+}
+
+function wireQuickTagButtons(containerEl) {
+  containerEl.querySelectorAll(".quick-tag-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const input = document.getElementById(btn.dataset.target);
+      const current = input.value.split(",").map(t => t.trim()).filter(Boolean);
+      if (!current.includes(btn.dataset.tag)) current.push(btn.dataset.tag);
+      input.value = current.join(", ");
+      input.focus();
+    });
+  });
+}
+
 async function loadDropdownData() {
   // Topics/subtopics are intentionally NOT loaded here -- they're scoped
   // to a subject+unit (and subtopics further to a topic), so they're
@@ -66,10 +92,16 @@ async function loadDropdownData() {
 
 // ---------------------------------------------------------------
 // Browse filter cascade: Subject -> Unit -> Topic -> Subtopic
-// Each level is disabled with a placeholder until the level above it
-// has a value, and picking a new value at any level clears/disables
-// everything below it (since a subtopic list, say, is meaningless
-// once the topic it belonged to has changed).
+// ---------------------------------------------------------------
+// BROWSE FILTER CASCADE -- Subject anchors everything (single-select,
+// unchanged); Unit/Topic/Subtopic below it are toggle-chip multi-select
+// rather than dropdowns. Cascade is "loose": with nothing picked at a
+// level, the level below shows everything for the current subject
+// (not nothing) -- so e.g. leaving Unit unpicked still lets you browse
+// every topic for that subject, rather than forcing a unit choice
+// first. Subject is still required before Unit/Topic/Subtopic show
+// anything, since without it the topic list would be every topic
+// across every subject at once.
 // ---------------------------------------------------------------
 function setSelectState(id, enabled, placeholder, options) {
   const el = document.getElementById(id);
@@ -83,59 +115,107 @@ function setSelectState(id, enabled, placeholder, options) {
 }
 
 const UNIT_OPTIONS = ["1", "2", "3", "4"];
+const DIFFICULTY_OPTIONS = ["SF", "CF", "CU"];
 
-function resetUnitDown() {
-  setSelectState("f-unit", false, "Unit: pick a subject first");
-  resetTopicDown();
-}
-function resetTopicDown() {
-  setSelectState("f-topic", false, "Topic: pick a unit first");
-  resetSubtopicDown();
-}
-function resetSubtopicDown() {
-  setSelectState("f-subtopic", false, "Subtopic: pick a topic first");
-}
+let browseSelectedUnits = [];
+let browseSelectedTopics = [];
+let browseSelectedSubtopics = [];
+let browseSelectedDifficulties = [];
 
-document.getElementById("f-subject").addEventListener("change", () => {
-  const subject = document.getElementById("f-subject").value;
-  if (subject) {
-    setSelectState("f-unit", true, "Unit: any", UNIT_OPTIONS.map(u => `Unit ${u}`));
-    // store the raw unit numbers as values via a second pass, since the
-    // label ("Unit 3") and the filter value ("3") differ here
-    const unitEl = document.getElementById("f-unit");
-    unitEl.innerHTML = `<option value="">Unit: any</option>` +
-      UNIT_OPTIONS.map(u => `<option value="${u}">Unit ${u}</option>`).join("");
-  } else {
-    resetUnitDown();
+function renderChipRow(containerId, options, selectedArr, onToggle, emptyHint) {
+  const el = document.getElementById(containerId);
+  if (options.length === 0) {
+    el.innerHTML = emptyHint ? `<span class="muted">${emptyHint}</span>` : "";
+    return;
   }
-  resetTopicDown();
+  el.innerHTML = options.map(opt => `
+    <button type="button" class="chip-btn${selectedArr.includes(opt) ? " selected" : ""}" data-value="${escapeHtml(opt)}">${escapeHtml(opt)}</button>
+  `).join("");
+  el.querySelectorAll(".chip-btn").forEach(btn => {
+    btn.addEventListener("click", () => onToggle(btn.dataset.value));
+  });
+}
+
+function renderUnitChips() {
+  renderChipRow("f-unit-chips", UNIT_OPTIONS, browseSelectedUnits, toggleUnit);
+}
+function renderDifficultyChips() {
+  renderChipRow("f-difficulty-chips", DIFFICULTY_OPTIONS, browseSelectedDifficulties, toggleDifficulty);
+}
+
+async function refreshTopicChips() {
+  const subject = document.getElementById("f-subject").value;
+  if (!subject) {
+    renderChipRow("f-topic-chips", [], browseSelectedTopics, toggleTopic, "Pick a subject first");
+    return;
+  }
+  const params = new URLSearchParams({ subject });
+  browseSelectedUnits.forEach(u => params.append("unit", u));
+  const topics = await fetchJSON("/api/topics?" + params.toString());
+  // Drop any selected topic that no longer applies (e.g. unit selection
+  // narrowed the list) so stale filters can't silently keep applying.
+  browseSelectedTopics = browseSelectedTopics.filter(t => topics.includes(t));
+  renderChipRow("f-topic-chips", topics, browseSelectedTopics, toggleTopic,
+    topics.length === 0 ? "No topics chopped yet for this scope" : null);
+}
+
+async function refreshSubtopicChips() {
+  const subject = document.getElementById("f-subject").value;
+  if (!subject) {
+    renderChipRow("f-subtopic-chips", [], browseSelectedSubtopics, toggleSubtopic, "Pick a subject first");
+    return;
+  }
+  const params = new URLSearchParams({ subject });
+  browseSelectedUnits.forEach(u => params.append("unit", u));
+  browseSelectedTopics.forEach(t => params.append("topic", t));
+  const subtopics = await fetchJSON("/api/subtopics?" + params.toString());
+  browseSelectedSubtopics = browseSelectedSubtopics.filter(s => subtopics.includes(s));
+  renderChipRow("f-subtopic-chips", subtopics, browseSelectedSubtopics, toggleSubtopic,
+    subtopics.length === 0 ? "No subtopics set for this scope" : null);
+}
+
+function toggleArrValue(arr, value) {
+  const i = arr.indexOf(value);
+  if (i === -1) arr.push(value); else arr.splice(i, 1);
+}
+
+function toggleUnit(value) {
+  toggleArrValue(browseSelectedUnits, value);
+  renderUnitChips();
+  refreshTopicChips().then(refreshSubtopicChips);
+  refreshBrowse(true);
+}
+function toggleTopic(value) {
+  toggleArrValue(browseSelectedTopics, value);
+  refreshTopicChips();
+  refreshSubtopicChips();
+  refreshBrowse(true);
+}
+function toggleSubtopic(value) {
+  toggleArrValue(browseSelectedSubtopics, value);
+  refreshSubtopicChips();
+  refreshBrowse(true);
+}
+function toggleDifficulty(value) {
+  toggleArrValue(browseSelectedDifficulties, value);
+  renderDifficultyChips();
+  refreshBrowse(true);
+}
+
+document.getElementById("f-subject").addEventListener("change", async () => {
+  // A subject change invalidates whatever units/topics/subtopics were
+  // picked for the OLD subject, same reasoning as the old strict cascade.
+  browseSelectedUnits = [];
+  browseSelectedTopics = [];
+  browseSelectedSubtopics = [];
+  renderUnitChips();
+  await refreshTopicChips();
+  await refreshSubtopicChips();
+  refreshBrowse(true);
 });
 
-document.getElementById("f-unit").addEventListener("change", async () => {
-  const subject = document.getElementById("f-subject").value;
-  const unit = document.getElementById("f-unit").value;
-  if (subject && unit) {
-    const topics = await fetchJSON(`/api/topics?subject=${encodeURIComponent(subject)}&unit=${encodeURIComponent(unit)}`);
-    setSelectState("f-topic", true, topics.length ? "Topic: any" : "Topic: none chopped yet", topics);
-  } else {
-    resetTopicDown();
-  }
-  resetSubtopicDown();
-});
-
-document.getElementById("f-topic").addEventListener("change", async () => {
-  const subject = document.getElementById("f-subject").value;
-  const unit = document.getElementById("f-unit").value;
-  const topic = document.getElementById("f-topic").value;
-  if (subject && unit && topic) {
-    const subtopics = await fetchJSON(
-      `/api/subtopics?subject=${encodeURIComponent(subject)}&unit=${encodeURIComponent(unit)}&topic=${encodeURIComponent(topic)}`
-    );
-    setSelectState("f-subtopic", true, subtopics.length ? "Subtopic: any" : "Subtopic: none set yet", subtopics);
-  } else {
-    resetSubtopicDown();
-  }
-});
+renderUnitChips();
+renderDifficultyChips();
 
 // ---------------------------------------------------------------
 // ADD PAPER
@@ -507,18 +587,69 @@ document.querySelectorAll(".mode-btn").forEach(btn => {
   });
 });
 
+// Natural sort for question numbers like "Q2" vs "Q10" vs "Q4b" -- splits
+// into digit/non-digit chunks and compares digit chunks numerically, so
+// Q10 sorts after Q2 instead of before it (plain string comparison would
+// put "10" before "2" since '1' < '2' as characters).
+function naturalCompare(a, b) {
+  const chunk = s => (s || "").match(/\d+|\D+/g) || [];
+  const ca = chunk(a), cb = chunk(b);
+  for (let i = 0; i < Math.max(ca.length, cb.length); i++) {
+    const xa = ca[i] || "", xb = cb[i] || "";
+    const na = parseInt(xa, 10), nb = parseInt(xb, 10);
+    if (!isNaN(na) && !isNaN(nb) && na !== nb) return na - nb;
+    if (xa !== xb) return xa < xb ? -1 : 1;
+  }
+  return 0;
+}
+
 async function populateAnswerQuestionSelect() {
   const select = document.getElementById("answer-q-select");
-  const questions = await fetchJSON(`/api/questions?paper_id=${currentPaper.id}`);
+  // per_page comfortably covers even a very large single paper -- this
+  // list is scoped to one paper_id, not the whole database, so it stays
+  // small regardless of how many thousand questions are in TutorDB overall.
+  const data = await fetchJSON(`/api/questions?paper_id=${currentPaper.id}&per_page=500`);
+  const questions = data.questions;
   if (questions.length === 0) {
     select.innerHTML = `<option value="">No questions chopped yet for this paper</option>`;
     return;
   }
+  // Ordered to match how you'd naturally chop through a paper -- by page,
+  // then by question number -- so "next in the list" after saving an
+  // answer really does mean "the next question on the paper", which is
+  // what makes the auto-advance below useful rather than arbitrary.
+  questions.sort((a, b) => {
+    const pa = a.question_images[0]?.page_number ?? Infinity;
+    const pb = b.question_images[0]?.page_number ?? Infinity;
+    if (pa !== pb) return pa - pb;
+    return naturalCompare(a.question_number, b.question_number);
+  });
   select.innerHTML = questions.map(q => `
-    <option value="${q.id}">
+    <option value="${q.id}" data-has-answer="${q.has_answer ? "1" : ""}">
       ${q.question_number ? escapeHtml(q.question_number) + " — " : ""}${escapeHtml(q.topic)} (${q.difficulty})${q.has_answer ? " [already has an answer]" : ""}
     </option>
   `).join("");
+}
+
+// Called right after an answer is saved. Moves the "Link to question"
+// dropdown to the next question (in paper order) that doesn't have an
+// answer yet -- so chopping a paper's worked solutions is just "draw a
+// box, save, draw the next box, save" without re-picking the question
+// each time. The dropdown itself is untouched otherwise, so overriding
+// it manually (to answer out of order) still works exactly as before.
+function advanceAnswerSelect(justAnsweredId) {
+  const select = document.getElementById("answer-q-select");
+  const options = [...select.options];
+  const idx = options.findIndex(o => o.value === String(justAnsweredId));
+  if (idx === -1) return;
+  for (let i = idx + 1; i < options.length; i++) {
+    if (!options[i].dataset.hasAnswer) {
+      select.value = options[i].value;
+      return;
+    }
+  }
+  // Nothing unanswered left after this one -- leave the selection as-is
+  // rather than jumping somewhere unexpected.
 }
 
 // Sets `scale` to whatever absolute value makes the page fill the
@@ -559,7 +690,8 @@ async function renderPage(num) {
   if (dpr !== 1) renderContext.transform = [dpr, 0, 0, dpr, 0, 0];
   await page.render(renderContext).promise;
 
-  document.getElementById("page-indicator").textContent = `Page ${num} / ${pdfDoc.numPages}`;
+  document.getElementById("page-input").value = num;
+  document.getElementById("page-total").textContent = pdfDoc.numPages;
   document.getElementById("zoom-input").value = Math.round(scale * 100);
   clearOverlay();
 }
@@ -617,6 +749,34 @@ document.getElementById("zoom-input").addEventListener("keydown", (e) => {
   }
 });
 document.getElementById("zoom-input").addEventListener("blur", applyTypedZoom);
+
+// Type a specific page number directly, as an alternative to </>. Applies
+// on Enter or when you click away from the field -- same interaction
+// pattern as the zoom box right next to it.
+function applyTypedPage() {
+  if (!pdfDoc) return;
+  const input = document.getElementById("page-input");
+  let val = parseInt(input.value, 10);
+  if (isNaN(val)) {
+    input.value = currentPage; // reject garbage input, restore current value
+    return;
+  }
+  val = Math.max(1, Math.min(pdfDoc.numPages, val));
+  if (val !== currentPage) {
+    currentPage = val;
+    renderPage(currentPage);
+  } else {
+    input.value = currentPage;
+  }
+}
+document.getElementById("page-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    applyTypedPage();
+    document.getElementById("page-input").blur();
+  }
+});
+document.getElementById("page-input").addEventListener("blur", applyTypedPage);
 
 // Note: we deliberately do NOT auto-refit on window "resize". iOS Safari
 // fires resize events constantly during ordinary scrolling (its address
@@ -724,6 +884,7 @@ function cropSelection(x, y, w, h) {
       document.getElementById("crop-preview").src = previewUrl;
       document.getElementById("crop-preview-wrap").style.display = "block";
       document.getElementById("save-question").disabled = false;
+      document.getElementById("quick-save-question").disabled = false;
       document.getElementById("add-question-part").disabled = false;
     }
   }, "image/png");
@@ -762,6 +923,7 @@ document.getElementById("add-question-part").addEventListener("click", () => {
   pendingCropPage = null;
   document.getElementById("crop-preview-wrap").style.display = "none";
   document.getElementById("save-question").disabled = stagedQuestionParts.length === 0;
+  document.getElementById("quick-save-question").disabled = stagedQuestionParts.length === 0;
   document.getElementById("add-question-part").disabled = true;
   clearOverlay();
 });
@@ -801,6 +963,7 @@ function resetQuestionForm() {
   renderStagedParts("question-staged-parts", stagedQuestionParts);
   document.getElementById("crop-preview-wrap").style.display = "none";
   document.getElementById("save-question").disabled = true;
+  document.getElementById("quick-save-question").disabled = true;
   document.getElementById("add-question-part").disabled = true;
   document.getElementById("chop-status").textContent = "";
 }
@@ -895,6 +1058,49 @@ document.getElementById("save-question").addEventListener("click", async () => {
   }
 });
 
+// Chop-everything-fast-now path: skips the topic/unit/difficulty
+// requirement entirely and creates the question via /api/questions/quick
+// (stored unclassified), then uploads whatever's been drawn exactly like
+// the normal save does. The full "chop then classify, chop then
+// classify" flow above is unchanged and still the default -- this is
+// just an alternate button for when you'd rather batch the classifying
+// into the Classify tab afterward.
+document.getElementById("quick-save-question").addEventListener("click", async () => {
+  const statusEl = document.getElementById("chop-status");
+  const parts = [...stagedQuestionParts];
+  if (pendingCropBlob) parts.push({ blob: pendingCropBlob, page: pendingCropPage });
+
+  if (parts.length === 0) {
+    statusEl.textContent = "Draw a box around the question first (draw more than one if it spans several pages).";
+    statusEl.className = "status-msg err";
+    return;
+  }
+
+  statusEl.textContent = "Saving...";
+  statusEl.className = "status-msg";
+
+  try {
+    const question = await fetchJSON("/api/questions/quick", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paper_id: currentPaperId, page_number: parts[0].page }),
+    });
+
+    await uploadParts(question.id, "/crop", "image", parts);
+
+    statusEl.textContent = parts.length > 1
+      ? `Quick-saved with ${parts.length} pages -- classify later on the Classify tab. Draw the next one.`
+      : "Quick-saved -- classify later on the Classify tab. Draw the next one.";
+    statusEl.className = "status-msg ok";
+    clearOverlay();
+    resetQuestionForm();
+    refreshUnclassifiedBadge();
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+    statusEl.className = "status-msg err";
+  }
+});
+
 document.getElementById("save-answer").addEventListener("click", async () => {
   const statusEl = document.getElementById("answer-chop-status");
   const questionId = document.getElementById("answer-q-select").value;
@@ -926,6 +1132,7 @@ document.getElementById("save-answer").addEventListener("click", async () => {
     clearOverlay();
     resetAnswerForm();
     await populateAnswerQuestionSelect(); // refresh the "[already has an answer]" labels
+    advanceAnswerSelect(questionId);
   } catch (err) {
     statusEl.textContent = "Error: " + err.message;
     statusEl.className = "status-msg err";
@@ -935,51 +1142,163 @@ document.getElementById("save-answer").addEventListener("click", async () => {
 // ---------------------------------------------------------------
 // BROWSE TAB
 // ---------------------------------------------------------------
-document.getElementById("apply-filters").addEventListener("click", refreshBrowse);
-document.getElementById("clear-filters").addEventListener("click", () => {
-  ["f-subject", "f-school", "f-difficulty", "f-exam-type"].forEach(id => document.getElementById(id).value = "");
+const BROWSE_PAGE_SIZE = 60;
+
+document.getElementById("apply-filters").addEventListener("click", () => refreshBrowse(true));
+document.getElementById("clear-filters").addEventListener("click", async () => {
+  ["f-subject", "f-school", "f-exam-type", "f-paper"].forEach(id => document.getElementById(id).value = "");
   document.getElementById("f-tags").value = "";
   document.getElementById("f-tags-exclude").value = "";
-  resetUnitDown(); // also clears/disables topic + subtopic beneath it
-  refreshBrowse();
+  browseSelectedUnits = [];
+  browseSelectedTopics = [];
+  browseSelectedSubtopics = [];
+  browseSelectedDifficulties = [];
+  renderUnitChips();
+  renderDifficultyChips();
+  await refreshTopicChips();
+  await refreshSubtopicChips();
+  resetPaperDown();
+  refreshBrowse(true);
 });
 
-async function refreshBrowse() {
-  await loadDropdownData();
+// The Paper filter is scoped to whatever Subject (and School, if set) is
+// currently picked -- same cascading idea as Unit/Topic/Subtopic, just
+// against the papers list instead of topics, so you're not scrolling
+// through every paper in the whole database to find the one you want.
+function resetPaperDown() {
+  setSelectState("f-paper", false, "Paper: pick a subject first");
+}
+
+async function refreshPaperFilterOptions() {
+  const subject = document.getElementById("f-subject").value;
+  if (!subject) {
+    resetPaperDown();
+    return;
+  }
+  const school = document.getElementById("f-school").value;
+  const papers = await fetchJSON("/api/papers");
+  const matches = papers.filter(p => p.subject === subject && (!school || p.school === school));
+  const el = document.getElementById("f-paper");
+  const current = el.value;
+  el.disabled = false;
+  el.innerHTML = `<option value="">Paper: any</option>` + matches.map(p =>
+    `<option value="${p.id}">${escapeHtml(p.school)} — Y${p.year_level}, ${escapeHtml(p.exam_type)}${p.exam_year ? ", " + p.exam_year : ""}</option>`
+  ).join("");
+  if (matches.some(p => String(p.id) === current)) el.value = current;
+}
+
+document.getElementById("f-subject").addEventListener("change", refreshPaperFilterOptions);
+document.getElementById("f-school").addEventListener("change", refreshPaperFilterOptions);
+
+let browsePage = 1;
+let browseHasMore = false;
+let browseLoading = false;
+
+// Tag-based section ordering for the "one specific paper" view -- your
+// papers are tagged "Tech free" / "Tech active" (MCQs included, since
+// they're tagged with one of those plus "MCQ"), so that's the grouping
+// key: untagged first, then Tech free, then Tech active, natural-sorted
+// by question number within each group.
+function paperClassSortKey(q) {
+  if (q.tags.includes("Tech free")) return 1;
+  if (q.tags.includes("Tech active")) return 2;
+  return 0;
+}
+function sortForSinglePaper(questions) {
+  return [...questions].sort((a, b) => {
+    const ka = paperClassSortKey(a), kb = paperClassSortKey(b);
+    if (ka !== kb) return ka - kb;
+    return naturalCompare(a.question_number, b.question_number);
+  });
+}
+
+// `reset` = true for a fresh filter/search (page 1, replace results);
+// false is used only internally by "Load more" to append the next page.
+async function refreshBrowse(reset = true) {
+  if (reset) {
+    await loadDropdownData();
+    browsePage = 1;
+    browseResultsCache = [];
+  }
+  if (browseLoading) return;
+  browseLoading = true;
 
   const params = new URLSearchParams();
   const subject = document.getElementById("f-subject").value;
   const school = document.getElementById("f-school").value;
-  const unit = document.getElementById("f-unit").value;
-  const topic = document.getElementById("f-topic").value;
-  const subtopic = document.getElementById("f-subtopic").value;
-  const difficulty = document.getElementById("f-difficulty").value;
   const examType = document.getElementById("f-exam-type").value;
+  const paperId = document.getElementById("f-paper").value;
   const tagsRaw = document.getElementById("f-tags").value;
   const excludeTagsRaw = document.getElementById("f-tags-exclude").value;
 
   if (subject) params.append("subject", subject);
   if (school) params.append("school", school);
-  if (unit) params.append("unit", unit);
-  if (topic) params.append("topic", topic);
-  if (subtopic) params.append("subtopic", subtopic);
-  if (difficulty) params.append("difficulty", difficulty);
+  browseSelectedUnits.forEach(u => params.append("unit", u));
+  browseSelectedTopics.forEach(t => params.append("topic", t));
+  browseSelectedSubtopics.forEach(s => params.append("subtopic", s));
+  browseSelectedDifficulties.forEach(d => params.append("difficulty", d));
   if (examType) params.append("exam_type", examType);
+  if (paperId) params.append("paper_id", paperId);
   if (tagsRaw) tagsRaw.split(",").map(t => t.trim()).filter(Boolean).forEach(t => params.append("tag", t));
   if (excludeTagsRaw) excludeTagsRaw.split(",").map(t => t.trim()).filter(Boolean).forEach(t => params.append("exclude_tag", t));
 
-  const questions = await fetchJSON("/api/questions?" + params.toString());
-  browseResultsCache = questions;
-  document.getElementById("results-count").textContent = `${questions.length} question(s)`;
+  // A specific paper is selected -- a paper only ever has dozens of
+  // questions, so fetch all of them in one go (no pagination needed)
+  // and sort into the Tech free / Tech active ordering client-side,
+  // instead of the usual server-paginated recency order.
+  const singlePaperMode = !!paperId;
 
-  const grid = document.getElementById("results-grid");
-  if (questions.length === 0) {
-    grid.innerHTML = `<p class="muted">No questions match these filters yet.</p>`;
-    return;
+  if (singlePaperMode) {
+    params.append("page", 1);
+    params.append("per_page", 500);
+  } else {
+    params.append("page", browsePage);
+    params.append("per_page", BROWSE_PAGE_SIZE);
   }
 
-  grid.innerHTML = questions.map(renderQuestionCard).join("");
+  try {
+    const data = await fetchJSON("/api/questions?" + params.toString());
+    if (singlePaperMode) {
+      browseResultsCache = sortForSinglePaper(data.questions);
+      browseHasMore = false;
+    } else {
+      browseResultsCache = reset ? data.questions : browseResultsCache.concat(data.questions);
+      browseHasMore = data.has_more;
+    }
+    document.getElementById("results-count").textContent =
+      `${data.total} question(s)${browseResultsCache.length < data.total ? ` — showing ${browseResultsCache.length}` : ""}`;
+
+    const grid = document.getElementById("results-grid");
+    if (browseResultsCache.length === 0) {
+      grid.innerHTML = `<p class="muted">No questions match these filters yet.</p>`;
+    } else {
+      grid.innerHTML = browseResultsCache.map(renderQuestionCard).join("");
+    }
+    renderLoadMoreButton();
+  } finally {
+    browseLoading = false;
+  }
 }
+
+function renderLoadMoreButton() {
+  const el = document.getElementById("results-load-more");
+  if (!el) return;
+  if (!browseHasMore) {
+    el.style.display = "none";
+    return;
+  }
+  el.style.display = "block";
+  el.disabled = false;
+  el.textContent = "Load more";
+}
+
+document.getElementById("results-load-more").addEventListener("click", async () => {
+  const btn = document.getElementById("results-load-more");
+  btn.disabled = true;
+  btn.textContent = "Loading...";
+  browsePage += 1;
+  await refreshBrowse(false);
+});
 
 let browseResultsCache = [];
 
@@ -992,15 +1311,16 @@ function renderQuestionCard(q) {
   return `
     <div class="q-card" id="q-card-${q.id}">
       ${thumb
-        ? `<img src="/files/${thumb.file_path}" alt="Question ${q.question_number || ""}">`
+        ? `<img src="/files/${thumb.file_path}" alt="Question ${q.question_number || ""}" loading="lazy">`
         : `<div class="muted">No crop image (page ${q.page_number || "?"})</div>`
       }
       ${q.question_images.length > 1 ? `<div class="page-count-badge">${q.question_images.length} pages</div>` : ""}
+      ${!q.is_classified ? `<div class="page-count-badge">⚠ unclassified</div>` : ""}
       <div class="meta-row">
         <span>${escapeHtml(q.school)} · ${escapeHtml(q.subject)}</span>
-        <span class="diff-tag ${q.difficulty}">${q.difficulty}</span>
+        <span class="diff-tag ${q.difficulty}">${q.difficulty || "?"}</span>
       </div>
-      <div class="muted">${escapeHtml(q.topic)}${q.subtopic ? " · " + escapeHtml(q.subtopic) : ""}</div>
+      <div class="muted">${q.topic ? escapeHtml(q.topic) + (q.subtopic ? " · " + escapeHtml(q.subtopic) : "") : "Not classified yet"}</div>
       <div>${q.tags.map(t => `<span class="tag-pill">${escapeHtml(t)}</span>`).join("")}</div>
       <div class="card-actions">
         <button class="secondary" onclick="openQuestionModal(${q.id})">Details</button>
@@ -1009,6 +1329,259 @@ function renderQuestionCard(q) {
     </div>
   `;
 }
+
+
+// ---------------------------------------------------------------
+// CLASSIFY TAB -- sort quickly through everything chopped via
+// "Quick save (classify later)". Works as a queue: always shows
+// classifyQueue[0]; a successful save/delete removes it from the front
+// and the next one is already there, so the whole loop is
+// draw-nothing / type-a-few-fields / click / repeat with no re-picking
+// of "what's next" in between.
+// ---------------------------------------------------------------
+let classifyQueue = [];
+let classifyRemaining = 0;
+let classifySubjectFilter = "";
+let classifySelectedDifficulty = null;
+
+async function refreshClassifyTab() {
+  const subjects = await fetchJSON("/api/subjects");
+  populateSelect("classify-subject-filter", subjects, "All subjects");
+  document.getElementById("classify-subject-filter").value = classifySubjectFilter;
+  classifyQueue = [];
+  await loadMoreClassifyQueue();
+  renderClassifyCurrent();
+}
+
+document.getElementById("classify-subject-filter").addEventListener("change", () => {
+  classifySubjectFilter = document.getElementById("classify-subject-filter").value;
+  refreshClassifyTab();
+});
+
+// Pulls another batch of unclassified questions. Deliberately small and
+// re-fetched as the queue runs low, rather than loading every
+// unclassified question in the database up front -- keeps this fast
+// whether the backlog is a dozen questions or several hundred.
+async function loadMoreClassifyQueue() {
+  const params = new URLSearchParams();
+  params.append("unclassified", "1");
+  if (classifySubjectFilter) params.append("subject", classifySubjectFilter);
+  params.append("per_page", "40");
+  const data = await fetchJSON("/api/questions?" + params.toString());
+  classifyRemaining = data.total;
+  // Skip any already in the queue (in case a batch reload overlaps with
+  // what's already staged locally after a subject-filter change).
+  const existingIds = new Set(classifyQueue.map(q => q.id));
+  classifyQueue = classifyQueue.concat(data.questions.filter(q => !existingIds.has(q.id)));
+}
+
+async function refreshUnclassifiedBadge() {
+  const data = await fetchJSON("/api/questions?unclassified=1&per_page=1");
+  const btn = document.getElementById("classify-tab-btn");
+  btn.innerHTML = data.total > 0
+    ? `Classify <span class="unclassified-badge">${data.total}</span>`
+    : "Classify";
+}
+
+function renderClassifyCurrent() {
+  const area = document.getElementById("classify-area");
+  document.getElementById("classify-remaining").textContent =
+    classifyRemaining > 0 ? `${classifyRemaining} unclassified` : "";
+
+  const q = classifyQueue[0];
+  if (!q) {
+    area.innerHTML = classifyRemaining === 0
+      ? `<p class="muted">Nothing to classify -- everything's sorted.</p>`
+      : `<p class="muted">Loading...</p>`;
+    return;
+  }
+
+  classifySelectedDifficulty = null;
+
+  const pages = q.question_images.map(img => `
+    <div class="detail-page">
+      ${img.page_number ? `<span class="detail-page-label">Page ${img.page_number}</span>` : ""}
+      <img class="detail-full-img" src="/files/${img.file_path}" alt="Question">
+    </div>
+  `).join("");
+
+  area.innerHTML = `
+    <div class="classify-layout">
+      <div class="classify-images">
+        ${pages || `<p class="muted">No crop image (page ${q.page_number || "?"})</p>`}
+      </div>
+      <div class="classify-form">
+        <div class="muted">${escapeHtml(q.school)} · ${escapeHtml(q.subject)}</div>
+
+        <label>Unit
+          <select id="cl-unit">
+            <option value="">Choose a unit</option>
+            <option value="1">Unit 1</option>
+            <option value="2">Unit 2</option>
+            <option value="3">Unit 3</option>
+            <option value="4">Unit 4</option>
+          </select>
+        </label>
+
+        <label>Topic
+          <input type="text" id="cl-topic" list="cl-topic-list" autofocus>
+          <datalist id="cl-topic-list"></datalist>
+        </label>
+
+        <label>Subtopic (optional)
+          <input type="text" id="cl-subtopic" list="cl-subtopic-list">
+          <datalist id="cl-subtopic-list"></datalist>
+        </label>
+
+        <label>Question number
+          <input type="text" id="cl-number" placeholder="e.g. 4b" value="${escapeHtml(q.question_number || "")}">
+        </label>
+
+        <label>Difficulty</label>
+        <div class="difficulty-buttons" id="cl-diff-buttons">
+          <button type="button" class="diff-btn" data-diff="SF">SF</button>
+          <button type="button" class="diff-btn" data-diff="CF">CF</button>
+          <button type="button" class="diff-btn" data-diff="CU">CU</button>
+        </div>
+
+        <label>Tags (comma separated)
+          <input type="text" id="cl-tags">
+        </label>
+        ${quickTagButtonsHtml("cl-tags")}
+
+        <label>Notes (optional)
+          <textarea id="cl-notes" rows="2"></textarea>
+        </label>
+
+        <div class="classify-actions">
+          <button type="button" id="cl-save-next">Save &amp; next</button>
+          <button type="button" class="secondary" id="cl-skip">Skip for now</button>
+          <button type="button" class="secondary" id="cl-delete">Delete</button>
+        </div>
+        <div id="classify-status" class="status-msg"></div>
+      </div>
+    </div>
+  `;
+
+  document.querySelectorAll("#cl-diff-buttons .diff-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("#cl-diff-buttons .diff-btn").forEach(b => b.classList.remove("selected"));
+      btn.classList.add("selected");
+      classifySelectedDifficulty = btn.dataset.diff;
+    });
+  });
+
+  // Same subject+unit -> topic -> subtopic scoping used everywhere else
+  // in the app, so the suggestions here match what you've already used.
+  async function refreshClTopics() {
+    const unit = document.getElementById("cl-unit").value;
+    if (!unit) { populateDatalist("cl-topic-list", []); return; }
+    const topics = await fetchJSON(`/api/topics?subject=${encodeURIComponent(q.subject)}&unit=${encodeURIComponent(unit)}`);
+    populateDatalist("cl-topic-list", topics);
+  }
+  async function refreshClSubtopics() {
+    const unit = document.getElementById("cl-unit").value;
+    const topic = document.getElementById("cl-topic").value.trim();
+    if (!unit || !topic) { populateDatalist("cl-subtopic-list", []); return; }
+    const subtopics = await fetchJSON(`/api/subtopics?subject=${encodeURIComponent(q.subject)}&unit=${encodeURIComponent(unit)}&topic=${encodeURIComponent(topic)}`);
+    populateDatalist("cl-subtopic-list", subtopics);
+  }
+  document.getElementById("cl-unit").addEventListener("change", () => {
+    refreshClTopics();
+    // Unit just changed, so whatever's sitting in the topic box (partial
+    // text from before the switch) no longer scopes anything -- clear
+    // subtopics now and only repopulate once a fresh topic is typed
+    // (below), instead of eagerly re-querying with a stale topic value.
+    // This matches how the original Chop form's unit handler behaves.
+    populateDatalist("cl-subtopic-list", []);
+  });
+  let clSubtopicTimer = null;
+  document.getElementById("cl-topic").addEventListener("input", () => {
+    clearTimeout(clSubtopicTimer);
+    clSubtopicTimer = setTimeout(refreshClSubtopics, 250);
+  });
+
+  document.getElementById("cl-save-next").addEventListener("click", saveClassifyCurrent);
+  wireQuickTagButtons(area);
+  document.getElementById("cl-skip").addEventListener("click", skipClassifyCurrent);
+  document.getElementById("cl-delete").addEventListener("click", deleteClassifyCurrent);
+}
+
+async function advanceClassifyQueue() {
+  classifyQueue.shift();
+  if (classifyQueue.length < 5) await loadMoreClassifyQueue();
+  renderClassifyCurrent();
+  refreshUnclassifiedBadge();
+}
+
+async function saveClassifyCurrent() {
+  const q = classifyQueue[0];
+  const statusEl = document.getElementById("classify-status");
+  const topic = document.getElementById("cl-topic").value.trim();
+  const unit = document.getElementById("cl-unit").value;
+
+  if (!unit) {
+    statusEl.textContent = "Pick a unit (1-4).";
+    statusEl.className = "status-msg err";
+    return;
+  }
+  if (!topic) {
+    statusEl.textContent = "Topic is required.";
+    statusEl.className = "status-msg err";
+    return;
+  }
+  if (!classifySelectedDifficulty) {
+    statusEl.textContent = "Pick a difficulty (SF/CF/CU).";
+    statusEl.className = "status-msg err";
+    return;
+  }
+
+  statusEl.textContent = "Saving...";
+  statusEl.className = "status-msg";
+
+  const tags = document.getElementById("cl-tags").value
+    .split(",").map(t => t.trim()).filter(Boolean);
+
+  try {
+    await fetchJSON(`/api/questions/${q.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        unit: parseInt(unit, 10),
+        topic,
+        subtopic: document.getElementById("cl-subtopic").value.trim() || null,
+        question_number: document.getElementById("cl-number").value.trim() || null,
+        difficulty: classifySelectedDifficulty,
+        notes: document.getElementById("cl-notes").value.trim() || null,
+        tags,
+      }),
+    });
+    classifyRemaining = Math.max(0, classifyRemaining - 1);
+    await advanceClassifyQueue();
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+    statusEl.className = "status-msg err";
+  }
+}
+
+// Not a save -- just cycles this one to the back of the local queue so
+// you can come back to it after the easier ones, without it vanishing
+// from the backlog.
+function skipClassifyCurrent() {
+  if (classifyQueue.length > 1) {
+    classifyQueue.push(classifyQueue.shift());
+  }
+  renderClassifyCurrent();
+}
+
+async function deleteClassifyCurrent() {
+  const q = classifyQueue[0];
+  if (!confirm("Delete this question?")) return;
+  await fetchJSON(`/api/questions/${q.id}`, { method: "DELETE" });
+  classifyRemaining = Math.max(0, classifyRemaining - 1);
+  await advanceClassifyQueue();
+}
+
 
 // ---------------------------------------------------------------
 // Full-screen question viewer (opened via "Details")
@@ -1128,6 +1701,7 @@ function renderModalEditForm(q) {
       <label>Tags (comma separated)
         <input type="text" id="modal-edit-tags">
       </label>
+      ${quickTagButtonsHtml("modal-edit-tags")}
 
       <label>Notes (optional)
         <textarea id="modal-edit-notes" rows="2"></textarea>
@@ -1149,6 +1723,7 @@ function renderModalEditForm(q) {
   document.getElementById("modal-edit-notes").value = q.notes || "";
 
   const form = document.getElementById("modal-edit-form");
+  wireQuickTagButtons(form);
   form.querySelectorAll(".diff-btn").forEach(btn => {
     if (btn.dataset.diff === q.difficulty) btn.classList.add("selected");
     btn.addEventListener("click", () => {
@@ -1367,3 +1942,7 @@ window.removeAnswerImage = removeAnswerImage;
 
 loadDropdownData();
 refreshBrowse();
+refreshUnclassifiedBadge();
+
+document.getElementById("q-quick-tags").innerHTML = quickTagButtonsHtml("q-tags");
+wireQuickTagButtons(document.getElementById("q-quick-tags"));
