@@ -190,13 +190,13 @@
             </select>
           </label>
 
-          <label>Topic
-            <input list="topic-list" id="q-topic" required>
+          <label>Topic (comma separated)
+            <input type="text" id="q-topic" data-suggest-from="topic-list" required>
             <datalist id="topic-list"></datalist>
           </label>
 
-          <label>Subtopic (optional)
-            <input type="text" id="q-subtopic" list="subtopic-list">
+          <label>Subtopic (optional, comma separated)
+            <input type="text" id="q-subtopic" data-suggest-from="subtopic-list">
             <datalist id="subtopic-list"></datalist>
           </label>
 

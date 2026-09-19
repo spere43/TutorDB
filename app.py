@@ -140,6 +140,18 @@ class Question(db.Model):
 
     tags = db.relationship("Tag", secondary=question_tags, backref="questions")
 
+    # A question can carry several topics and subtopics (typed comma-separated,
+    # like tags). The full lists live in these link tables; `topic` and
+    # `subtopic` above stay in place as the FIRST entry of each list, kept in
+    # sync by set_topics() -- so every older question (and anything that still
+    # reads the single-value columns, incl. is_classified) works untouched.
+    topic_links = db.relationship(
+        "QuestionTopic", cascade="all, delete-orphan", order_by="QuestionTopic.position",
+    )
+    subtopic_links = db.relationship(
+        "QuestionSubtopic", cascade="all, delete-orphan", order_by="QuestionSubtopic.position",
+    )
+
     # A question (or its worked solution) can span several pages/regions --
     # each chopped box, or each manually-uploaded solution page, becomes one
     # QuestionImage row here rather than a single fixed file path. `kind`
@@ -159,6 +171,11 @@ class Question(db.Model):
             "unit": self.unit,
             "topic": self.topic,
             "subtopic": self.subtopic,
+            # Full lists. `topic`/`subtopic` above remain the first entry, as
+            # before. The fallback keeps a row that somehow has no link rows
+            # yet (e.g. created by an older version) reading correctly.
+            "topics": [l.name for l in self.topic_links] or ([self.topic] if self.topic else []),
+            "subtopics": [l.name for l in self.subtopic_links] or ([self.subtopic] if self.subtopic else []),
             "difficulty": self.difficulty,
             "page_number": self.page_number,
             "notes": self.notes,
@@ -200,6 +217,68 @@ class QuestionImage(db.Model):
             "file_path": self.file_path,
             "order_index": self.order_index,
         }
+
+
+class QuestionTopic(db.Model):
+    """One topic on a question. `position` 0 is the primary topic, which is
+    also mirrored into questions.topic."""
+    __tablename__ = "question_topics"
+    id = db.Column(db.Integer, primary_key=True)
+    question_id = db.Column(db.Integer, db.ForeignKey("questions.id"), nullable=False)
+    name = db.Column(db.String(120), nullable=False)
+    position = db.Column(db.Integer, nullable=False, default=0)
+
+
+class QuestionSubtopic(db.Model):
+    """One subtopic on a question -- same shape as QuestionTopic."""
+    __tablename__ = "question_subtopics"
+    id = db.Column(db.Integer, primary_key=True)
+    question_id = db.Column(db.Integer, db.ForeignKey("questions.id"), nullable=False)
+    name = db.Column(db.String(120), nullable=False)
+    position = db.Column(db.Integer, nullable=False, default=0)
+
+
+def clean_names(raw):
+    """Trims, drops blanks and non-strings, and de-duplicates (case-insensitive,
+    first spelling wins) while keeping order -- the first item is the primary."""
+    out, seen = [], set()
+    for item in raw or []:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            out.append(name)
+    return out
+
+
+def names_from_payload(data, plural, singular):
+    """Reads a topic/subtopic list from a request body. Accepts the list form
+    (`topics: [...]`) or the original single-value form (`topic: "..."`).
+    A single string is ALWAYS one item and is never split on commas, because
+    real topic names can contain commas ("Thermal, nuclear and electrical
+    physics") -- splitting typed text into separate topics is the client's
+    job. Returns None when neither key was sent (= leave it alone)."""
+    if plural in data:
+        value = data[plural]
+        return clean_names(value if isinstance(value, list) else [value])
+    if singular in data:
+        return clean_names([data[singular]])
+    return None
+
+
+def set_topics(question, topics=None, subtopics=None):
+    """The one place topics/subtopics get written. Updates the link rows AND
+    the legacy single-value columns together so they can never disagree.
+    Pass None to leave a list untouched."""
+    if topics is not None:
+        if topics != [l.name for l in question.topic_links]:
+            question.topic_links = [QuestionTopic(name=n, position=i) for i, n in enumerate(topics)]
+        question.topic = topics[0] if topics else ""
+    if subtopics is not None:
+        if subtopics != [l.name for l in question.subtopic_links]:
+            question.subtopic_links = [QuestionSubtopic(name=n, position=i) for i, n in enumerate(subtopics)]
+        question.subtopic = subtopics[0] if subtopics else None
 
 
 # ---------- Routes ----------
@@ -460,9 +539,9 @@ def build_question_query(args):
     if units:
         query = query.filter(Question.unit.in_([int(u) for u in units]))
     if topics:
-        query = query.filter(Question.topic.in_(topics))
+        query = query.filter(Question.topic_links.any(QuestionTopic.name.in_(topics)))
     if subtopics:
-        query = query.filter(Question.subtopic.in_(subtopics))
+        query = query.filter(Question.subtopic_links.any(QuestionSubtopic.name.in_(subtopics)))
     if difficulties:
         query = query.filter(Question.difficulty.in_([d.upper() for d in difficulties]))
     if exam_type:
@@ -536,6 +615,8 @@ def list_questions():
             joinedload(Question.paper),
             selectinload(Question.tags),
             selectinload(Question.images),
+            selectinload(Question.topic_links),
+            selectinload(Question.subtopic_links),
         )
         .order_by(Question.id.desc())
         .offset((page - 1) * per_page)
@@ -560,8 +641,8 @@ def create_question():
       "paper_id": 1,
       "question_number": "4b",
       "unit": 3,
-      "topic": "Calculus",
-      "subtopic": "Related rates",
+      "topics": ["Calculus", "Probability"],      (or the older "topic": "Calculus")
+      "subtopics": ["Related rates"],             (or the older "subtopic": "...")
       "difficulty": "CU",
       "page_number": 3,
       "notes": "...",
@@ -570,7 +651,8 @@ def create_question():
     Cropped image upload happens via a separate endpoint (see /api/questions/<id>/crop).
     """
     data = request.get_json()
-    if not data or not data.get("paper_id") or not data.get("topic") or not data.get("difficulty"):
+    topics = names_from_payload(data, "topics", "topic") if data else None
+    if not data or not data.get("paper_id") or not topics or not data.get("difficulty"):
         return jsonify({"error": "paper_id, topic, and difficulty are required"}), 400
 
     paper = Paper.query.get(data["paper_id"])
@@ -588,12 +670,13 @@ def create_question():
         paper_id=paper.id,
         question_number=normalize_question_number(data.get("question_number")),
         unit=int(unit) if unit is not None else None,
-        topic=data["topic"],
-        subtopic=data.get("subtopic"),
+        topic=topics[0],
+        subtopic=None,
         difficulty=data["difficulty"].upper(),
         page_number=data.get("page_number"),
         notes=data.get("notes"),
     )
+    set_topics(question, topics, names_from_payload(data, "subtopics", "subtopic") or [])
 
     tag_names = data.get("tags", [])
     for name in tag_names:
@@ -662,9 +745,15 @@ def update_question(question_id):
     question = Question.query.get_or_404(question_id)
     data = request.get_json() or {}
 
-    for field in ["topic", "subtopic", "notes", "page_number"]:
+    for field in ["notes", "page_number"]:
         if field in data:
             setattr(question, field, data[field])
+
+    set_topics(
+        question,
+        names_from_payload(data, "topics", "topic"),
+        names_from_payload(data, "subtopics", "subtopic"),
+    )
 
     if "question_number" in data:
         question.question_number = normalize_question_number(data["question_number"])
@@ -809,7 +898,9 @@ def list_topics():
     as before."""
     subject = request.args.get("subject")
     units = request.args.getlist("unit")
-    query = db.session.query(Question.topic).join(Paper).distinct()
+    query = db.session.query(QuestionTopic.name) \
+        .join(Question, QuestionTopic.question_id == Question.id) \
+        .join(Paper, Question.paper_id == Paper.id).distinct()
     if subject:
         query = query.filter(Paper.subject == subject)
     if units:
@@ -826,14 +917,15 @@ def list_subtopics():
     subject = request.args.get("subject")
     units = request.args.getlist("unit")
     topics = request.args.getlist("topic")
-    query = db.session.query(Question.subtopic).join(Paper) \
-        .filter(Question.subtopic.isnot(None)).distinct()
+    query = db.session.query(QuestionSubtopic.name) \
+        .join(Question, QuestionSubtopic.question_id == Question.id) \
+        .join(Paper, Question.paper_id == Paper.id).distinct()
     if subject:
         query = query.filter(Paper.subject == subject)
     if units:
         query = query.filter(Question.unit.in_([int(u) for u in units]))
     if topics:
-        query = query.filter(Question.topic.in_(topics))
+        query = query.filter(Question.topic_links.any(QuestionTopic.name.in_(topics)))
     return jsonify(sorted([s[0] for s in query.all() if s[0]]))
 
 
@@ -933,6 +1025,33 @@ if __name__ == "__main__":
         if changed:
             db.session.commit()
 
+        # Multi-topic support. db.create_all() above has already created the
+        # question_topics / question_subtopics tables (empty). This copies each
+        # EXISTING question's single topic/subtopic in as its first list entry.
+        # It only ever INSERTs into the new tables -- the questions table and
+        # its columns are never modified -- and it's safe to re-run every
+        # start-up: a question is only backfilled if it has no rows yet.
+        # An older version of the app (which only knows the single-value
+        # columns) may have edited or deleted questions since, so first drop
+        # link rows whose question is gone, and after the backfill realign
+        # the first entry of any question whose column was changed.
+        with db.engine.begin() as conn:
+            for table, column in (("question_topics", "topic"), ("question_subtopics", "subtopic")):
+                conn.execute(db.text(f"DELETE FROM {table} WHERE question_id NOT IN (SELECT id FROM questions)"))
+                conn.execute(db.text(f"""
+                    INSERT INTO {table} (question_id, name, position)
+                    SELECT q.id, q.{column}, 0 FROM questions q
+                    WHERE q.{column} IS NOT NULL AND TRIM(q.{column}) != ''
+                      AND NOT EXISTS (SELECT 1 FROM {table} l WHERE l.question_id = q.id)
+                """))
+                conn.execute(db.text(f"""
+                    UPDATE {table}
+                    SET name = (SELECT q.{column} FROM questions q WHERE q.id = {table}.question_id)
+                    WHERE position = 0
+                      AND (SELECT TRIM(q.{column}) FROM questions q WHERE q.id = {table}.question_id) != ''
+                      AND name != (SELECT q.{column} FROM questions q WHERE q.id = {table}.question_id)
+                """))
+
         # Indexes for the columns Browse actually filters/joins on. Safe to
         # add on top of an existing database with data already in it --
         # CREATE INDEX IF NOT EXISTS only builds a lookup structure
@@ -949,6 +1068,10 @@ if __name__ == "__main__":
             conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_question_difficulty ON questions(difficulty)"))
             conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_question_unit ON questions(unit)"))
             conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_qimage_question_id ON question_images(question_id)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_qtopic_name ON question_topics(name)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_qtopic_question_id ON question_topics(question_id)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_qsubtopic_name ON question_subtopics(name)"))
+            conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_qsubtopic_question_id ON question_subtopics(question_id)"))
     # debug=False: this runs permanently as a systemd service, not a dev
     # session -- the debug reloader can restart mid-request on a file
     # change, and the debugger's error page allows running arbitrary code

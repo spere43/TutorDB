@@ -74,6 +74,117 @@ function wireQuickTagButtons(containerEl) {
   });
 }
 
+// ---------------------------------------------------------------
+// Multi-value topic / subtopic fields
+// ---------------------------------------------------------------
+// A question can have several topics and subtopics, typed comma-separated
+// exactly like tags ("Integrals, Discrete random variables"). The first one
+// is the primary topic.
+
+// Splits a comma-separated field into a clean list: trimmed, blanks dropped,
+// de-duplicated (case-insensitive), order kept. `known` is the names already
+// in use -- a name that itself contains a comma (e.g. "Thermal, nuclear and
+// electrical physics") is kept whole when it appears in that list, rather
+// than being split apart.
+function parseMulti(raw, known = []) {
+  const commaNames = known.filter(k => k.includes(",")).sort((a, b) => b.length - a.length);
+  const out = [];
+  let rest = raw;
+  for (;;) {
+    rest = rest.replace(/^[\s,]+/, "");
+    if (!rest) break;
+    let item = null;
+    const lower = rest.toLowerCase();
+    for (const name of commaNames) {
+      const n = name.toLowerCase();
+      if (lower.startsWith(n) && /^\s*(,|$)/.test(rest.slice(n.length))) {
+        item = rest.slice(0, n.length);
+        rest = rest.slice(n.length);
+        break;
+      }
+    }
+    if (item === null) {
+      const i = rest.indexOf(",");
+      item = i === -1 ? rest : rest.slice(0, i);
+      rest = i === -1 ? "" : rest.slice(i);
+    }
+    item = item.trim();
+    if (item && !out.some(o => o.toLowerCase() === item.toLowerCase())) out.push(item);
+  }
+  return out;
+}
+
+function sameList(a, b) {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+function datalistValues(id) {
+  const dl = document.getElementById(id);
+  return dl ? [...dl.options].map(o => o.value).filter(Boolean) : [];
+}
+
+// "&topic=A&topic=B" for the topics currently typed in a topic field -- used
+// to scope subtopic suggestions (the API ORs repeated topic params).
+function topicParams(topicInput, extraKnown = []) {
+  const known = [...datalistValues(topicInput.dataset.suggestFrom), ...extraKnown];
+  return parseMulti(topicInput.value, known).map(t => `&topic=${encodeURIComponent(t)}`).join("");
+}
+
+// A native <datalist> can only autocomplete the whole field value, so it stops
+// helping after the first comma. This keeps the datalist as the source of
+// names (so all the existing code that fills it still works) and shows the
+// ones not yet used as click-to-add chips under the field, narrowed by
+// whatever is being typed after the last comma -- same look as the tag chips.
+function attachMultiSuggest(input) {
+  const sourceId = input.dataset.suggestFrom;
+  const box = document.createElement("div");
+  box.className = "quick-tag-row";
+  // every name is shown (none hidden); a long list scrolls inside the box
+  // instead of pushing the rest of the form down
+  box.style.maxHeight = "132px";
+  box.style.overflowY = "auto";
+  input.insertAdjacentElement("afterend", box);
+
+  function render() {
+    const options = datalistValues(sourceId);
+    const cut = input.value.lastIndexOf(",");
+    const chosen = parseMulti(cut === -1 ? "" : input.value.slice(0, cut), options).map(v => v.toLowerCase());
+    const typing = input.value.slice(cut + 1).trim().toLowerCase();
+    const seen = new Set();
+    const shown = options
+      .filter(o => {
+        const key = o.trim().toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        // skip names already chosen, and one that's been typed out in full
+        return !chosen.includes(key) && key !== typing && key.includes(typing);
+      });
+    box.replaceChildren(...shown.map(o => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "quick-tag-btn";
+      btn.dataset.value = o;
+      btn.textContent = "+ " + o;
+      return btn;
+    }));
+    box.style.display = shown.length ? "" : "none";
+  }
+
+  box.addEventListener("click", e => {
+    const btn = e.target.closest("button[data-value]");
+    if (!btn) return;
+    const cut = input.value.lastIndexOf(",");
+    const head = cut === -1 ? "" : input.value.slice(0, cut + 1).trimEnd() + " ";
+    input.value = head + btn.dataset.value + ", ";
+    input.focus();
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  input.addEventListener("input", render);
+  const source = document.getElementById(sourceId);
+  if (source) new MutationObserver(render).observe(source, { childList: true });
+  render();
+}
+
 async function loadDropdownData() {
   // Topics/subtopics are intentionally NOT loaded here -- they're scoped
   // to a subject+unit (and subtopics further to a topic), so they're
@@ -543,14 +654,14 @@ let subtopicFetchTimer = null;
 document.getElementById("q-topic").addEventListener("input", () => {
   clearTimeout(subtopicFetchTimer);
   subtopicFetchTimer = setTimeout(async () => {
-    const topic = document.getElementById("q-topic").value.trim();
+    const topics = topicParams(document.getElementById("q-topic"));
     const unit = document.getElementById("q-unit").value;
-    if (!currentPaper || !unit || !topic) {
+    if (!currentPaper || !unit || !topics) {
       populateDatalist("subtopic-list", []);
       return;
     }
     const subtopics = await fetchJSON(
-      `/api/subtopics?subject=${encodeURIComponent(currentPaper.subject)}&unit=${encodeURIComponent(unit)}&topic=${encodeURIComponent(topic)}`
+      `/api/subtopics?subject=${encodeURIComponent(currentPaper.subject)}&unit=${encodeURIComponent(unit)}${topics}`
     );
     populateDatalist("subtopic-list", subtopics);
   }, 250);
@@ -626,7 +737,7 @@ async function populateAnswerQuestionSelect() {
   });
   select.innerHTML = questions.map(q => `
     <option value="${q.id}" data-has-answer="${q.has_answer ? "1" : ""}">
-      ${q.question_number ? escapeHtml(q.question_number) + " — " : ""}${escapeHtml(q.topic)} (${q.difficulty})${q.has_answer ? " [already has an answer]" : ""}
+      ${q.question_number ? escapeHtml(q.question_number) + " — " : ""}${escapeHtml(q.topics.join(", "))} (${q.difficulty})${q.has_answer ? " [already has an answer]" : ""}
     </option>
   `).join("");
 }
@@ -1023,6 +1134,9 @@ function resetQuestionForm() {
   document.getElementById("q-number").value = "";
   document.getElementById("q-topic").value = "";
   document.getElementById("q-subtopic").value = "";
+  // clearing programmatically fires no event, so refresh the suggestion chips
+  document.getElementById("q-topic").dispatchEvent(new Event("input"));
+  document.getElementById("q-subtopic").dispatchEvent(new Event("input"));
   document.getElementById("q-tags").value = "";
   document.getElementById("q-notes").value = "";
   document.querySelectorAll(".diff-btn").forEach(b => b.classList.remove("selected"));
@@ -1063,7 +1177,7 @@ async function uploadParts(questionId, endpoint, fileField, parts) {
 
 document.getElementById("save-question").addEventListener("click", async () => {
   const statusEl = document.getElementById("chop-status");
-  const topic = document.getElementById("q-topic").value.trim();
+  const topics = parseMulti(document.getElementById("q-topic").value, datalistValues("topic-list"));
   const unit = document.getElementById("q-unit").value;
 
   const parts = [...stagedQuestionParts];
@@ -1074,7 +1188,7 @@ document.getElementById("save-question").addEventListener("click", async () => {
     statusEl.className = "status-msg err";
     return;
   }
-  if (!topic) {
+  if (!topics.length) {
     statusEl.textContent = "Topic is required.";
     statusEl.className = "status-msg err";
     return;
@@ -1104,8 +1218,8 @@ document.getElementById("save-question").addEventListener("click", async () => {
         paper_id: currentPaperId,
         question_number: document.getElementById("q-number").value.trim() || null,
         unit: parseInt(unit, 10),
-        topic,
-        subtopic: document.getElementById("q-subtopic").value.trim() || null,
+        topics,
+        subtopics: parseMulti(document.getElementById("q-subtopic").value, datalistValues("subtopic-list")),
         difficulty: selectedDifficulty,
         page_number: parts[0].page,
         notes: document.getElementById("q-notes").value.trim() || null,
@@ -1390,7 +1504,7 @@ function renderQuestionCard(q) {
         <span>${escapeHtml(q.school)} · ${escapeHtml(q.subject)}</span>
         <span class="diff-tag ${q.difficulty}">${q.difficulty || "?"}</span>
       </div>
-      <div class="muted">${q.topic ? escapeHtml(q.topic) + (q.subtopic ? " · " + escapeHtml(q.subtopic) : "") : "Not classified yet"}</div>
+      <div class="muted">${q.topics.length ? escapeHtml(q.topics.join(", ")) + (q.subtopics.length ? " · " + escapeHtml(q.subtopics.join(", ")) : "") : "Not classified yet"}</div>
       <div>${q.tags.map(t => `<span class="tag-pill">${escapeHtml(t)}</span>`).join("")}</div>
       <div class="card-actions">
         <button class="secondary" onclick="openQuestionModal(${q.id})">Details</button>
@@ -1493,13 +1607,13 @@ function renderClassifyCurrent() {
           </select>
         </label>
 
-        <label>Topic
-          <input type="text" id="cl-topic" list="cl-topic-list" autofocus>
+        <label>Topic (comma separated)
+          <input type="text" id="cl-topic" data-suggest-from="cl-topic-list" autofocus>
           <datalist id="cl-topic-list"></datalist>
         </label>
 
-        <label>Subtopic (optional)
-          <input type="text" id="cl-subtopic" list="cl-subtopic-list">
+        <label>Subtopic (optional, comma separated)
+          <input type="text" id="cl-subtopic" data-suggest-from="cl-subtopic-list">
           <datalist id="cl-subtopic-list"></datalist>
         </label>
 
@@ -1551,9 +1665,9 @@ function renderClassifyCurrent() {
   }
   async function refreshClSubtopics() {
     const unit = document.getElementById("cl-unit").value;
-    const topic = document.getElementById("cl-topic").value.trim();
-    if (!unit || !topic) { populateDatalist("cl-subtopic-list", []); return; }
-    const subtopics = await fetchJSON(`/api/subtopics?subject=${encodeURIComponent(q.subject)}&unit=${encodeURIComponent(unit)}&topic=${encodeURIComponent(topic)}`);
+    const topics = topicParams(document.getElementById("cl-topic"));
+    if (!unit || !topics) { populateDatalist("cl-subtopic-list", []); return; }
+    const subtopics = await fetchJSON(`/api/subtopics?subject=${encodeURIComponent(q.subject)}&unit=${encodeURIComponent(unit)}${topics}`);
     populateDatalist("cl-subtopic-list", subtopics);
   }
   document.getElementById("cl-unit").addEventListener("change", () => {
@@ -1573,6 +1687,8 @@ function renderClassifyCurrent() {
 
   document.getElementById("cl-save-next").addEventListener("click", saveClassifyCurrent);
   wireQuickTagButtons(area);
+  attachMultiSuggest(document.getElementById("cl-topic"));
+  attachMultiSuggest(document.getElementById("cl-subtopic"));
   document.getElementById("cl-skip").addEventListener("click", skipClassifyCurrent);
   document.getElementById("cl-delete").addEventListener("click", deleteClassifyCurrent);
 }
@@ -1587,7 +1703,7 @@ async function advanceClassifyQueue() {
 async function saveClassifyCurrent() {
   const q = classifyQueue[0];
   const statusEl = document.getElementById("classify-status");
-  const topic = document.getElementById("cl-topic").value.trim();
+  const topics = parseMulti(document.getElementById("cl-topic").value, datalistValues("cl-topic-list"));
   const unit = document.getElementById("cl-unit").value;
 
   if (!unit) {
@@ -1595,7 +1711,7 @@ async function saveClassifyCurrent() {
     statusEl.className = "status-msg err";
     return;
   }
-  if (!topic) {
+  if (!topics.length) {
     statusEl.textContent = "Topic is required.";
     statusEl.className = "status-msg err";
     return;
@@ -1618,8 +1734,8 @@ async function saveClassifyCurrent() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         unit: parseInt(unit, 10),
-        topic,
-        subtopic: document.getElementById("cl-subtopic").value.trim() || null,
+        topics,
+        subtopics: parseMulti(document.getElementById("cl-subtopic").value, datalistValues("cl-subtopic-list")),
         question_number: document.getElementById("cl-number").value.trim() || null,
         difficulty: classifySelectedDifficulty,
         notes: document.getElementById("cl-notes").value.trim() || null,
@@ -1695,7 +1811,7 @@ function renderModalQuestion() {
 
   document.getElementById("modal-position").textContent = `${modalIndex + 1} / ${browseResultsCache.length}`;
   document.getElementById("modal-meta").textContent =
-    `${q.school} · ${q.subject}${q.unit ? " · Unit " + q.unit : ""}${q.topic ? " · " + q.topic : ""}${q.subtopic ? " · " + q.subtopic : ""}`;
+    `${q.school} · ${q.subject}${q.unit ? " · Unit " + q.unit : ""}${q.topics.length ? " · " + q.topics.join(", ") : ""}${q.subtopics.length ? " · " + q.subtopics.join(", ") : ""}`;
   document.getElementById("modal-prev").disabled = modalIndex === 0;
   document.getElementById("modal-next").disabled = modalIndex === browseResultsCache.length - 1;
 
@@ -1747,13 +1863,13 @@ function renderModalEditForm(q) {
         </select>
       </label>
 
-      <label>Topic
-        <input type="text" id="modal-edit-topic" list="modal-edit-topic-list">
+      <label>Topic (comma separated)
+        <input type="text" id="modal-edit-topic" data-suggest-from="modal-edit-topic-list">
         <datalist id="modal-edit-topic-list"></datalist>
       </label>
 
-      <label>Subtopic (optional)
-        <input type="text" id="modal-edit-subtopic" list="modal-edit-subtopic-list">
+      <label>Subtopic (optional, comma separated)
+        <input type="text" id="modal-edit-subtopic" data-suggest-from="modal-edit-subtopic-list">
         <datalist id="modal-edit-subtopic-list"></datalist>
       </label>
 
@@ -1786,14 +1902,16 @@ function renderModalEditForm(q) {
   `;
 
   document.getElementById("modal-edit-unit").value = q.unit || "";
-  document.getElementById("modal-edit-topic").value = q.topic || "";
-  document.getElementById("modal-edit-subtopic").value = q.subtopic || "";
+  document.getElementById("modal-edit-topic").value = q.topics.join(", ");
+  document.getElementById("modal-edit-subtopic").value = q.subtopics.join(", ");
   document.getElementById("modal-edit-number").value = q.question_number || "";
   document.getElementById("modal-edit-tags").value = q.tags.join(", ");
   document.getElementById("modal-edit-notes").value = q.notes || "";
 
   const form = document.getElementById("modal-edit-form");
   wireQuickTagButtons(form);
+  attachMultiSuggest(document.getElementById("modal-edit-topic"));
+  attachMultiSuggest(document.getElementById("modal-edit-subtopic"));
   form.querySelectorAll(".diff-btn").forEach(btn => {
     if (btn.dataset.diff === q.difficulty) btn.classList.add("selected");
     btn.addEventListener("click", () => {
@@ -1814,9 +1932,9 @@ function renderModalEditForm(q) {
   }
   async function refreshEditSubtopics() {
     const unit = document.getElementById("modal-edit-unit").value;
-    const topic = document.getElementById("modal-edit-topic").value.trim();
-    if (!unit || !topic) { populateDatalist("modal-edit-subtopic-list", []); return; }
-    const subtopics = await fetchJSON(`/api/subtopics?subject=${encodeURIComponent(q.subject)}&unit=${encodeURIComponent(unit)}&topic=${encodeURIComponent(topic)}`);
+    const topics = topicParams(document.getElementById("modal-edit-topic"), q.topics);
+    if (!unit || !topics) { populateDatalist("modal-edit-subtopic-list", []); return; }
+    const subtopics = await fetchJSON(`/api/subtopics?subject=${encodeURIComponent(q.subject)}&unit=${encodeURIComponent(unit)}${topics}`);
     populateDatalist("modal-edit-subtopic-list", subtopics);
   }
   document.getElementById("modal-edit-unit").addEventListener("change", () => {
@@ -1841,10 +1959,15 @@ function renderModalEditForm(q) {
 async function saveModalEdit() {
   const q = browseResultsCache[modalIndex];
   const statusEl = document.getElementById("modal-edit-status");
-  const topic = document.getElementById("modal-edit-topic").value.trim();
+  // `q.topics` is passed as "known" so a name that contains a comma on this
+  // very question always parses back to itself, never split in two.
+  const topics = parseMulti(document.getElementById("modal-edit-topic").value,
+    [...datalistValues("modal-edit-topic-list"), ...q.topics]);
+  const subtopics = parseMulti(document.getElementById("modal-edit-subtopic").value,
+    [...datalistValues("modal-edit-subtopic-list"), ...q.subtopics]);
   const unit = document.getElementById("modal-edit-unit").value;
 
-  if (!topic) {
+  if (!topics.length) {
     statusEl.textContent = "Topic is required.";
     statusEl.className = "status-msg err";
     return;
@@ -1867,8 +1990,11 @@ async function saveModalEdit() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         unit: unit ? parseInt(unit, 10) : null,
-        topic,
-        subtopic: document.getElementById("modal-edit-subtopic").value.trim() || null,
+        // Only send topics/subtopics that actually changed, so saving an
+        // unrelated edit (say, difficulty) can never touch how an existing
+        // question is classified.
+        ...(sameList(topics, q.topics.map(t => t.trim())) ? {} : { topics }),
+        ...(sameList(subtopics, q.subtopics.map(t => t.trim())) ? {} : { subtopics }),
         question_number: document.getElementById("modal-edit-number").value.trim() || null,
         difficulty: modalEditDifficulty,
         notes: document.getElementById("modal-edit-notes").value.trim() || null,
@@ -2016,3 +2142,5 @@ refreshUnclassifiedBadge();
 
 document.getElementById("q-quick-tags").innerHTML = quickTagButtonsHtml("q-tags");
 wireQuickTagButtons(document.getElementById("q-quick-tags"));
+attachMultiSuggest(document.getElementById("q-topic"));
+attachMultiSuggest(document.getElementById("q-subtopic"));
